@@ -511,7 +511,18 @@
     return peer;
   }
 
-  async function handleSignal(from, { description, candidate }) {
+  async function handleSignal(from, data) {
+    const { description, candidate } = data;
+    // Diagnóstico remoto: alguém da sala pediu um relatório técnico do meu envio
+    if (data.diag === 'request') {
+      try { sendSignal(from, { diag: 'report', report: await buildDiag() }); } catch (err) { console.warn('diag', err); }
+      return;
+    }
+    if (data.diag === 'report') {
+      window.__telaoDiag = window.__telaoDiag || {};
+      window.__telaoDiag[from] = data.report;
+      return;
+    }
     const peer = peers.get(from) || createPeer(from, '…');
     const pc = peer.pc;
     try {
@@ -1937,6 +1948,76 @@
 
   // Atalho para testes/depuração no console
   // =========================================================
+  // Diagnóstico (para investigar problemas de quem está do outro lado)
+  // =========================================================
+  const diagLog = [];
+  for (const level of ['error', 'warn']) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      try {
+        diagLog.push(`${new Date().toISOString().slice(11, 19)} ${level}: ${args.map((a) => (a && a.message) || String(a)).join(' ').slice(0, 300)}`);
+        if (diagLog.length > 40) diagLog.shift();
+      } catch {}
+      orig(...args);
+    };
+  }
+  window.addEventListener('error', (e) => { diagLog.push(`erro: ${e.message}`); if (diagLog.length > 40) diagLog.shift(); });
+  window.addEventListener('unhandledrejection', (e) => { diagLog.push(`promessa: ${(e.reason && e.reason.message) || e.reason}`); if (diagLog.length > 40) diagLog.shift(); });
+
+  async function buildDiag() {
+    const trackInfo = (s) => s && s.getTracks().map((t) => ({ kind: t.kind, state: t.readyState, muted: t.muted, enabled: t.enabled, hint: t.contentHint, settings: t.getSettings && t.getSettings() }));
+    const report = {
+      ua: navigator.userAgent,
+      version: loadedVersion,
+      settings: { codec: settings.codec, screenRes: settings.screenRes, screenFps: settings.screenFps, screenBitrate: settings.screenBitrate, screenPriority: settings.screenPriority },
+      chosenCodec: chosenCodec(),
+      gpuCodecs,
+      local: { screen: trackInfo(local.screen), camera: trackInfo(local.camera), mic: local.mic ? { muted: local.mic.muted } : null },
+      peers: [],
+      log: diagLog.slice(-25),
+    };
+    for (const p of peers.values()) {
+      const info = {
+        name: p.name,
+        conn: p.pc.connectionState,
+        ice: p.pc.iceConnectionState,
+        signaling: p.pc.signalingState,
+        noForcedCodec: !!p.noForcedCodec,
+        transceivers: p.pc.getTransceivers().map((t) => ({ mid: t.mid, dir: t.direction, cur: t.currentDirection, stopped: t.stopped, sendTrack: t.sender.track ? `${t.sender.track.kind}:${t.sender.track.readyState}` : null })),
+        params: [],
+        out: [],
+      };
+      for (const kind of ['screen', 'camera']) {
+        for (const s of p.senders[kind]) {
+          try { info.params.push({ kind, enc: s.getParameters().encodings, deg: s.getParameters().degradationPreference }); } catch (err) { info.params.push({ kind, err: String(err) }); }
+        }
+      }
+      try {
+        const r = await p.pc.getStats();
+        r.forEach((s) => {
+          if (s.type === 'outbound-rtp') {
+            info.out.push({ kind: s.kind, mid: s.mid, codec: s.codecId && r.get(s.codecId)?.mimeType, bytes: s.bytesSent, packets: s.packetsSent, frames: s.framesEncoded, sentFrames: s.framesSent, w: s.frameWidth, h: s.frameHeight, fps: s.framesPerSecond, limit: s.qualityLimitationReason, encoder: s.encoderImplementation, target: s.targetBitrate, keyFrames: s.keyFramesEncoded, pli: s.pliCount, nack: s.nackCount });
+          }
+          if (s.type === 'candidate-pair' && s.nominated) info.pair = { state: s.state, rtt: s.currentRoundTripTime, out: s.availableOutgoingBitrate, sent: s.bytesSent };
+        });
+      } catch (err) { info.statsErr = String(err); }
+      report.peers.push(info);
+    }
+    return report;
+  }
+
+  // Pede o relatório de alguém da sala (usado para investigar, pelo console: telao.diag('Nome'))
+  async function requestDiag(name) {
+    const p = [...peers.values()].find((x) => x.name === name || x.id === name);
+    if (!p) return 'ninguém com esse nome na sala';
+    window.__telaoDiag = window.__telaoDiag || {};
+    delete window.__telaoDiag[p.id];
+    sendSignal(p.id, { diag: 'request' });
+    for (let i = 0; i < 30 && !window.__telaoDiag[p.id]; i++) await new Promise((r) => setTimeout(r, 200));
+    return window.__telaoDiag[p.id] || 'sem resposta (a página dela pode estar numa versão antiga: precisa atualizar)';
+  }
+
+  // =========================================================
   // Versão nova do Telão
   // Confere de tempos em tempos se os arquivos do site mudaram. Se mudaram, avisa
   // (sem recarregar sozinho, para não derrubar ninguém no meio da transmissão).
@@ -2031,5 +2112,5 @@
     }
   } catch {}
 
-  window.telao = { peers, tiles, local, settings, voices, levels, checkVersion, codecs: () => ({ autoCodec, gpuCodecs }) };
+  window.telao = { peers, tiles, local, settings, voices, levels, checkVersion, diag: requestDiag, codecs: () => ({ autoCodec, gpuCodecs }) };
 })();
