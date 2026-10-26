@@ -34,9 +34,6 @@
   const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const IS_MOBILE = IS_ANDROID || IS_IOS || !!(navigator.userAgentData && navigator.userAgentData.mobile);
   const IS_FIREFOX = /Firefox\//.test(UA);
-  // Direção dos canais que eu abro para enviar. No Firefox, canais "só envio" chegaram a codificar
-  // sem nenhum pacote sair; "envio e recebimento" é o formato que sempre funcionou nele.
-  const SEND_DIRECTION = IS_FIREFOX || /[?&]sendrecv\b/.test(location.search) ? 'sendrecv' : 'sendonly';
 
   // O Chrome do Android tem a função, mas sempre recusa; por isso o Android fica de fora
   // ---------- Dentro do app de Android ----------
@@ -434,7 +431,6 @@
       makingOffer: false,
       ignoreOffer: false,
       senders: { screen: [], camera: [], mic: [] },
-      own: new Set(), // canais (transceivers) que eu criei
       meta: {},
       paramChain: Promise.resolve(),
       warnedFail: false,
@@ -563,29 +559,13 @@
     renderPeople();
   }
 
-  // Cada transmissão ganha canais próprios só de envio. (Com addTrack o navegador reaproveitava
-  // o canal aberto para a voz do amigo, e a tela nova não aparecia para ele sem reabrir.)
   function addStreamToPeer(peer, kind, stream) {
-    peer.senders[kind] = stream.getTracks().map((track) => {
-      const tr = peer.pc.addTransceiver(track, { direction: SEND_DIRECTION, streams: [stream] });
-      peer.own.add(tr);
-      return tr.sender;
-    });
+    peer.senders[kind] = stream.getTracks().map((track) => peer.pc.addTrack(track, stream));
   }
 
-  // Encerra de vez os canais da transmissão: o navegador recicla a vaga deles na próxima,
-  // então ligar/desligar muitas vezes não acumula canais.
   function removeStreamFromPeer(peer, kind) {
     for (const sender of peer.senders[kind]) {
-      const tr = peer.pc.getTransceivers().find((t) => t.sender === sender);
-      try {
-        if (tr && peer.own.has(tr) && typeof tr.stop === 'function') {
-          tr.stop();
-          peer.own.delete(tr);
-        } else {
-          peer.pc.removeTrack(sender);
-        }
-      } catch {}
+      try { peer.pc.removeTrack(sender); } catch {}
     }
     peer.senders[kind] = [];
   }
@@ -624,13 +604,15 @@
     }
   }
 
+  // O canal da voz é de "envio e recebimento": se o amigo começar a transmitir a tela com áudio,
+  // o navegador dele pode reaproveitar este canal para mandar esse áudio, e eu preciso conseguir
+  // receber por ele. (Com "só envio", a tela dele não aparecia para mim sem reabrir.)
   function addMicToPeer(peer) {
     if (!local.mic) return;
     const tr = peer.pc.addTransceiver(local.mic.track || 'audio', {
-      direction: SEND_DIRECTION,
+      direction: 'sendrecv',
       streams: [local.mic.stream],
     });
-    peer.own.add(tr);
     peer.senders.mic = [tr.sender];
   }
 
