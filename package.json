@@ -1,0 +1,20 @@
+{
+  "name": "telao",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Transmissão de tela e câmera entre amigos (WebRTC), para usar junto com o Discord",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "local": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

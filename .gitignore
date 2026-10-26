@@ -1,0 +1,14 @@
+node_modules/
+.wrangler/
+*.zip
+*.log
+
+# Android (chaves de assinatura nunca vão para o repositório)
+*.keystore
+*.jks
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml

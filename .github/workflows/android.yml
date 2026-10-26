@@ -1,0 +1,70 @@
+# Gera o app de Android (APK) a cada mudança na pasta android/ e publica em "Releases".
+# Link fixo para baixar a versão mais nova:
+#   https://github.com/<usuario>/telao/releases/latest/download/telao.apk
+name: App Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # Chave de assinatura guardada nos segredos do repositório
+      # (Settings → Secrets and variables → Actions → Secrets: TELAO_KEYSTORE_BASE64 e TELAO_KEYSTORE_PASSWORD)
+      - name: Preparar chave de assinatura
+        env:
+          KEYSTORE_B64: ${{ secrets.TELAO_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/telao.keystore"
+            echo "TELAO_KEYSTORE_FILE=$RUNNER_TEMP/telao.keystore" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Sem a chave nos segredos: o APK sai com assinatura temporária (para atualizar será preciso desinstalar a versão anterior)."
+          fi
+
+      - name: Compilar o APK
+        working-directory: android
+        env:
+          # Endereço do Telão embutido no app (Settings → Secrets and variables → Actions → Variables)
+          TELAO_URL: ${{ vars.TELAO_URL }}
+          TELAO_KEYSTORE_PASSWORD: ${{ secrets.TELAO_KEYSTORE_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Renomear
+        run: cp android/app/build/outputs/apk/release/app-release.apk telao.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: telao-apk
+          path: telao.apk
+
+      - name: Publicar em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-v1.0.${{ github.run_number }}
+          name: App Android 1.0.${{ github.run_number }}
+          body: |
+            Baixe o **telao.apk** abaixo pelo celular e abra para instalar.
+            Se já tiver o app, essa versão instala por cima.
+          files: telao.apk
+          make_latest: true

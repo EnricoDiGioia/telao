@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telão</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='3' y='6' width='26' height='17' rx='3' fill='%232ee6a6'/><rect x='12' y='25' width='8' height='2' rx='1' fill='%232ee6a6'/></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Tela de entrada -->
+  <section id="join" class="join">
+    <form id="joinForm" class="join-card" autocomplete="off">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" width="34" height="34" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3" fill="currentColor"/><rect x="12" y="25" width="8" height="2" rx="1" fill="currentColor"/></svg>
+        <span>Telão</span>
+      </div>
+      <p class="join-sub">Transmita sua tela e câmera para os amigos enquanto conversam no Discord.</p>
+
+      <label class="field">
+        <span>Seu nome</span>
+        <input id="nameInput" maxlength="32" required placeholder="Ex.: Enrico">
+      </label>
+      <label class="field">
+        <span>Sala</span>
+        <input id="roomInput" maxlength="64" required>
+      </label>
+      <button class="btn primary big" type="submit">Entrar na sala</button>
+      <p class="join-hint">Quem abrir o mesmo link com o mesmo nome de sala entra junto com você.</p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <section id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="room-info">
+        <span class="room-dot" id="connDot" title="Conexão com o servidor"></span>
+        <strong id="roomName"></strong>
+        <button class="btn ghost small" id="copyLink" type="button">Copiar convite</button>
+      </div>
+      <div class="people" id="people"></div>
+    </header>
+
+    <main class="stage" id="stage">
+      <div class="empty" id="empty">
+        <p>Ninguém está transmitindo ainda.</p>
+        <p class="muted">Use os botões lá embaixo para mostrar sua tela ou câmera.</p>
+      </div>
+    </main>
+
+    <footer class="controls">
+      <button class="ctrl" id="btnCam" type="button" title="Ligar/desligar câmera">
+        <svg viewBox="0 0 24 24"><path d="M15 8.5V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-1.5l5.3 3.2a.8.8 0 0 0 1.2-.7V6a.8.8 0 0 0-1.2-.7z"/></svg>
+        <span>Câmera</span>
+      </button>
+      <button class="ctrl" id="btnFlip" type="button" title="Virar câmera (frontal/traseira)" hidden>
+        <svg viewBox="0 0 24 24"><path d="M9 4 7.2 6H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3.2L15 4zm3 4.5a4.5 4.5 0 0 1 4.2 2.9l1.3-.8v3.6l-3.2-1.7 1.1-.6A2.8 2.8 0 0 0 12 10.2a2.8 2.8 0 0 0-2.3 1.2L8.3 10.6A4.5 4.5 0 0 1 12 8.5zm-5.5 4.2 3.2 1.7-1.1.6A2.8 2.8 0 0 0 12 15.8a2.8 2.8 0 0 0 2.3-1.2l1.4.8A4.5 4.5 0 0 1 12 17.5a4.5 4.5 0 0 1-4.2-2.9l-1.3.8z"/></svg>
+        <span>Virar</span>
+      </button>
+      <button class="ctrl" id="btnScreen" type="button" title="Transmitir tela">
+        <svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6v2h3v2H7v-2h3v-2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm8 3-4 4h3v4h2v-4h3z"/></svg>
+        <span>Transmitir tela</span>
+      </button>
+      <button class="ctrl" id="btnQuality" type="button" title="Qualidade da transmissão">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+        <span>Qualidade</span>
+      </button>
+      <button class="ctrl danger" id="btnLeave" type="button" title="Sair da sala">
+        <svg viewBox="0 0 24 24"><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5zm6.6 4.4L15.2 8.8l2.2 2.2H9v2h8.4l-2.2 2.2 1.4 1.4L21.2 12z"/></svg>
+        <span>Sair</span>
+      </button>
+
+      <!-- Painel de qualidade -->
+      <div class="panel" id="qualityPanel" hidden>
+        <h3>Tela</h3>
+        <div class="grid2">
+          <label class="field"><span>Resolução</span>
+            <select id="screenRes">
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+              <option value="1440">1440p</option>
+              <option value="source">Original</option>
+            </select>
+          </label>
+          <label class="field"><span>Quadros por segundo</span>
+            <select id="screenFps">
+              <option value="15">15 fps</option>
+              <option value="30">30 fps</option>
+              <option value="60">60 fps</option>
+            </select>
+          </label>
+          <label class="field"><span>Taxa de bits</span>
+            <select id="screenBitrate">
+              <option value="auto">Automática</option>
+              <option value="1500">1,5 Mbps (internet fraca)</option>
+              <option value="3000">3 Mbps</option>
+              <option value="6000">6 Mbps</option>
+              <option value="10000">10 Mbps</option>
+              <option value="16000">16 Mbps (rede local)</option>
+            </select>
+          </label>
+          <label class="field"><span>Priorizar</span>
+            <select id="screenPriority">
+              <option value="motion">Fluidez (jogos, vídeos)</option>
+              <option value="detail">Nitidez (texto, código)</option>
+            </select>
+          </label>
+        </div>
+        <label class="check screen-audio"><input type="checkbox" id="screenAudio"> Transmitir o áudio da tela</label>
+
+        <h3>Câmera</h3>
+        <div class="grid2">
+          <label class="field"><span>Dispositivo</span>
+            <select id="camDevice"><option value="">Padrão</option></select>
+          </label>
+          <label class="field"><span>Resolução</span>
+            <select id="camRes">
+              <option value="360">360p</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+            </select>
+          </label>
+          <label class="field"><span>Quadros por segundo</span>
+            <select id="camFps">
+              <option value="15">15 fps</option>
+              <option value="30">30 fps</option>
+              <option value="60">60 fps</option>
+            </select>
+          </label>
+        </div>
+        <h3>Desempenho</h3>
+        <div class="grid2">
+          <label class="field"><span>Codificação (envio)</span>
+            <select id="codec">
+              <option value="auto">Automática</option>
+              <option value="H264">H.264</option>
+              <option value="AV1">AV1</option>
+              <option value="VP9">VP9</option>
+              <option value="VP8">VP8</option>
+            </select>
+          </label>
+          <label class="field"><span>Reprodução (o que você assiste)</span>
+            <select id="playback">
+              <option value="realtime">Tempo real</option>
+              <option value="smooth">Mais suave (+0,3 s de atraso)</option>
+            </select>
+          </label>
+        </div>
+        <p class="panel-note" id="codecNote"></p>
+        <p class="panel-note">As mudanças valem na hora, mesmo durante a transmissão. O áudio da tela só muda na próxima vez que você começar a transmitir.</p>
+      </div>
+    </footer>
+  </section>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
