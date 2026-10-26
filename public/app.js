@@ -419,6 +419,7 @@
       makingOffer: false,
       ignoreOffer: false,
       senders: { screen: [], camera: [], mic: [] },
+      own: new Set(), // canais (transceivers) que eu criei
       meta: {},
       paramChain: Promise.resolve(),
       warnedFail: false,
@@ -536,13 +537,29 @@
     renderPeople();
   }
 
+  // Cada transmissão ganha canais próprios só de envio. (Com addTrack o navegador reaproveitava
+  // o canal aberto para a voz do amigo, e a tela nova não aparecia para ele sem reabrir.)
   function addStreamToPeer(peer, kind, stream) {
-    peer.senders[kind] = stream.getTracks().map((track) => peer.pc.addTrack(track, stream));
+    peer.senders[kind] = stream.getTracks().map((track) => {
+      const tr = peer.pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+      peer.own.add(tr);
+      return tr.sender;
+    });
   }
 
+  // Encerra de vez os canais da transmissão: o navegador recicla a vaga deles na próxima,
+  // então ligar/desligar muitas vezes não acumula canais.
   function removeStreamFromPeer(peer, kind) {
     for (const sender of peer.senders[kind]) {
-      try { peer.pc.removeTrack(sender); } catch {}
+      const tr = peer.pc.getTransceivers().find((t) => t.sender === sender);
+      try {
+        if (tr && peer.own.has(tr) && typeof tr.stop === 'function') {
+          tr.stop();
+          peer.own.delete(tr);
+        } else {
+          peer.pc.removeTrack(sender);
+        }
+      } catch {}
     }
     peer.senders[kind] = [];
   }
@@ -587,6 +604,7 @@
       direction: 'sendonly',
       streams: [local.mic.stream],
     });
+    peer.own.add(tr);
     peer.senders.mic = [tr.sender];
   }
 
