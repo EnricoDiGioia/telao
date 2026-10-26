@@ -230,6 +230,27 @@ button, input, select { font: inherit; color: inherit; }
 .ctrl:hover { border-color: #3a414d; }
 .ctrl.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
 .ctrl.unavailable { opacity: .45; }
+.ctrl.muted { background: rgba(255, 92, 108, .16); border-color: rgba(255, 92, 108, .55); color: #ff8a96; }
+.ctrl .ico { display: contents; font-style: normal; }
+
+/* Voz: quem está falando, microfone mutado, volume por pessoa */
+.person { transition: box-shadow .12s, border-color .12s; }
+.person.speaking { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(46, 230, 166, .45); }
+.person.clickable { cursor: pointer; }
+.person.clickable:hover { border-color: #3a414d; }
+.mic-state { display: inline-grid; place-items: center; color: var(--accent); }
+.mic-state svg { width: 14px; height: 14px; fill: currentColor; }
+.mic-state.muted { color: var(--danger); }
+.vol-pop {
+  position: fixed; z-index: 40;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; width: 240px;
+  box-shadow: 0 16px 40px rgba(0,0,0,.5);
+}
+.vol-pop-title { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.vol-pop-row { display: flex; align-items: center; gap: 10px; }
+.vol-pop-row input { flex: 1; accent-color: var(--accent); }
+.vol-pop-row span { width: 40px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
 .ctrl.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
 @media (max-width: 520px) { .ctrl span { display: none; } }
 

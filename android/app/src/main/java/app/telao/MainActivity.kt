@@ -95,6 +95,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // A página com a voz vai embora junto: solta o microfone
+        runCatching { startService(Intent(this, VoiceService::class.java).setAction(VoiceService.ACTION_OFF)) }
         web?.destroy()
         web = null
         super.onDestroy()
@@ -258,19 +260,29 @@ class MainActivity : Activity() {
         return w
     }
 
-    /** O site pediu a câmera: pede a permissão do Android e libera para o site. */
+    /** Recurso do site -> permissão do Android que ele precisa. */
+    private val webToAndroid = mapOf(
+        PermissionRequest.RESOURCE_VIDEO_CAPTURE to Manifest.permission.CAMERA,
+        PermissionRequest.RESOURCE_AUDIO_CAPTURE to Manifest.permission.RECORD_AUDIO,
+    )
+
+    private fun hasPermission(p: String) =
+        ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    /** O site pediu câmera e/ou microfone: pede a permissão do Android e libera para o site. */
     private fun handleWebPermission(request: PermissionRequest) {
-        val wantsVideo = request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
-        if (!wantsVideo) {
+        val wanted = request.resources.filter { it in webToAndroid }
+        if (wanted.isEmpty()) {
             request.deny()
             return
         }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+        val missing = wanted.mapNotNull { webToAndroid[it] }.filterNot { hasPermission(it) }
+        if (missing.isEmpty()) {
+            request.grant(wanted.toTypedArray())
         } else {
             pendingPermission?.deny()
             pendingPermission = request
-            requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
+            requestPermissions(missing.toTypedArray(), REQ_CAMERA)
         }
     }
 
@@ -280,11 +292,9 @@ class MainActivity : Activity() {
             REQ_CAMERA -> {
                 val req = pendingPermission ?: return
                 pendingPermission = null
-                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-                    req.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
-                } else {
-                    req.deny()
-                }
+                // Libera para o site só o que o Android deixou
+                val allowed = req.resources.filter { res -> webToAndroid[res]?.let { hasPermission(it) } == true }
+                if (allowed.isNotEmpty()) req.grant(allowed.toTypedArray()) else req.deny()
             }
             REQ_NOTIF -> askScreenCapture()
         }
@@ -408,6 +418,21 @@ class MainActivity : Activity() {
                         .putExtra(ScreenService.EXTRA_FPS, fps)
                         .putExtra(ScreenService.EXTRA_KBPS, kbps)
                 )
+            }
+        }
+
+        /** O site entrou/saiu da voz: mantém (ou solta) o microfone em segundo plano. */
+        @JavascriptInterface
+        fun voiceState(on: Boolean) {
+            runOnUiThread {
+                val i = Intent(this@MainActivity, VoiceService::class.java)
+                    .setAction(if (on) VoiceService.ACTION_ON else VoiceService.ACTION_OFF)
+                if (on) {
+                    if (!hasPermission(Manifest.permission.RECORD_AUDIO)) return@runOnUiThread
+                    runCatching { ContextCompat.startForegroundService(this@MainActivity, i) }
+                } else {
+                    runCatching { startService(i) }
+                }
             }
         }
 

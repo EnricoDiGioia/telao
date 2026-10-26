@@ -24,6 +24,8 @@
     codec: 'auto',
     playback: 'realtime',
     camFacing: 'user',
+    micDevice: '',
+    noiseSuppression: true,
   };
 
   // ---------- Que aparelho é este ----------
@@ -200,7 +202,9 @@
   let reconnectTimer = null;
 
   const peers = new Map(); // id -> peer
-  const local = { screen: null, camera: null }; // MediaStreams que EU estou enviando
+  const local = { screen: null, camera: null, mic: null }; // o que EU estou enviando (mic = { stream, track, muted })
+  const voices = new Map(); // chave -> { peerId, stream, audio } (voz de cada amigo)
+  let deafened = false; // "Silenciar": não ouvir ninguém
   const tiles = new Map(); // chave -> tile
   let focusKey = null;
   let pipWindow = null;
@@ -371,8 +375,11 @@
     const streams = {};
     if (local.screen) streams[local.screen.id] = 'screen';
     if (local.camera) streams[local.camera.id] = 'camera';
+    if (local.mic) streams[local.mic.stream.id] = local.mic.muted ? 'mic-muted' : 'mic';
     wsSend({ type: 'meta', name: myName, streams });
   }
+
+  const isMicKind = (k) => typeof k === 'string' && k.startsWith('mic');
 
   function applyMeta(peer, streams, name) {
     if (name) peer.name = name;
@@ -381,10 +388,18 @@
       if (t.ownerId !== peer.id) continue;
       if (!(t.stream.id in streams)) {
         removeTile(key);
+      } else if (isMicKind(streams[t.stream.id])) {
+        // era voz, não vídeo: tira o quadro e toca como voz
+        const stream = t.stream;
+        removeTile(key);
+        attachVoice(peer, stream);
       } else {
         t.kind = streams[t.stream.id];
         updateTileLabel(t);
       }
+    }
+    for (const [key, v] of [...voices]) {
+      if (v.peerId === peer.id && !(v.stream.id in streams)) removeVoice(key);
     }
     renderPeople();
   }
@@ -403,7 +418,7 @@
       polite: String(myId) > String(id),
       makingOffer: false,
       ignoreOffer: false,
-      senders: { screen: [], camera: [] },
+      senders: { screen: [], camera: [], mic: [] },
       meta: {},
       paramChain: Promise.resolve(),
       warnedFail: false,
@@ -428,6 +443,25 @@
 
     pc.ontrack = ({ track, streams }) => {
       const stream = streams[0] || new MediaStream([track]);
+      const kind = peer.meta[stream.id];
+      if (isMicKind(kind)) {
+        attachVoice(peer, stream);
+        return;
+      }
+      // Só áudio e ainda sem saber o que é: espera o aviso de "meta" chegar antes de decidir
+      if (kind === undefined && track.kind === 'audio' && !stream.getVideoTracks().length) {
+        setTimeout(() => {
+          if (!peers.has(peer.id)) return;
+          const k = peer.meta[stream.id];
+          if (isMicKind(k) || (k === undefined && !stream.getVideoTracks().length)) attachVoice(peer, stream);
+          else showRemoteStream(peer, stream);
+        }, 500);
+        return;
+      }
+      showRemoteStream(peer, stream);
+    };
+
+    const showRemoteStream = (peer, stream) => {
       const key = `${peer.id}:${stream.id}`;
       const isNew = !tiles.has(key);
       const t = ensureTile(key, { stream, ownerId: peer.id, kind: peer.meta[stream.id], local: false });
@@ -460,6 +494,7 @@
     for (const kind of ['screen', 'camera']) {
       if (local[kind]) addStreamToPeer(peer, kind, local[kind]);
     }
+    if (local.mic) addMicToPeer(peer);
     return peer;
   }
 
@@ -497,6 +532,7 @@
     try { peer.pc.close(); } catch {}
     peers.delete(id);
     for (const [key, t] of [...tiles]) if (t.ownerId === id) removeTile(key);
+    for (const [key, v] of [...voices]) if (v.peerId === id) removeVoice(key);
     renderPeople();
   }
 
@@ -510,6 +546,249 @@
     }
     peer.senders[kind] = [];
   }
+
+  // =========================================================
+  // Voz
+  // Cada amigo recebe um canal de áudio só meu. Mutar troca o microfone por "nada"
+  // (replaceTrack), sem renegociar: é instantâneo e desliga o microfone de verdade.
+  // =========================================================
+  function micConstraints() {
+    const c = {
+      echoCancellation: true,
+      noiseSuppression: settings.noiseSuppression !== false,
+      autoGainControl: true,
+    };
+    if (settings.micDevice) c.deviceId = { exact: settings.micDevice };
+    return c;
+  }
+
+  async function openMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast('Este navegador não deixa usar o microfone aqui (precisa ser https ou localhost).', 'error');
+      return null;
+    }
+    try {
+      return (await navigator.mediaDevices.getUserMedia({ audio: micConstraints() })).getAudioTracks()[0] || null;
+    } catch (err) {
+      if (settings.micDevice && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        settings.micDevice = '';
+        saveSettings();
+        return openMic();
+      }
+      const why = err.name === 'NotAllowedError' ? 'o acesso ao microfone foi negado' : err.message;
+      toast('Não deu para abrir o microfone: ' + why, 'error');
+      return null;
+    }
+  }
+
+  function addMicToPeer(peer) {
+    if (!local.mic) return;
+    const tr = peer.pc.addTransceiver(local.mic.track || 'audio', {
+      direction: 'sendonly',
+      streams: [local.mic.stream],
+    });
+    peer.senders.mic = [tr.sender];
+  }
+
+  function watchMicTrack(track) {
+    track.addEventListener('ended', () => {
+      // microfone desconectado: fica como mutado
+      if (local.mic && local.mic.track === track) setMicMuted(true);
+    });
+  }
+
+  async function joinVoice() {
+    const track = await openMic();
+    if (!track) return;
+    watchMicTrack(track);
+    local.mic = { stream: new MediaStream([track]), track, muted: false };
+    broadcastMeta();
+    for (const peer of peers.values()) addMicToPeer(peer);
+    watchLevel('me', local.mic.stream);
+    resumeAudio();
+    updateButtons();
+    renderPeople();
+    populateMics();
+    // No app de Android: mantém o microfone funcionando com o app em segundo plano
+    if (NATIVE && NATIVE.voiceState) NATIVE.voiceState(true);
+  }
+
+  async function setMicMuted(muted) {
+    const mic = local.mic;
+    if (!mic || mic.muted === muted) return;
+    if (muted) {
+      const old = mic.track;
+      mic.track = null;
+      mic.muted = true;
+      for (const peer of peers.values()) for (const s of peer.senders.mic) s.replaceTrack(null).catch(() => {});
+      if (old) {
+        old.stop();
+        mic.stream.removeTrack(old);
+      }
+      stopLevel('me');
+    } else {
+      const track = await openMic();
+      if (!track || !local.mic) return;
+      watchMicTrack(track);
+      mic.track = track;
+      mic.muted = false;
+      mic.stream.addTrack(track);
+      for (const peer of peers.values()) for (const s of peer.senders.mic) s.replaceTrack(track).catch(() => {});
+      watchLevel('me', mic.stream);
+    }
+    broadcastMeta();
+    updateButtons();
+    renderPeople();
+  }
+
+  function leaveVoice() {
+    const mic = local.mic;
+    if (!mic) return;
+    local.mic = null;
+    if (mic.track) mic.track.stop();
+    for (const peer of peers.values()) removeStreamFromPeer(peer, 'mic');
+    stopLevel('me');
+    broadcastMeta();
+    if (NATIVE && NATIVE.voiceState) NATIVE.voiceState(false);
+  }
+
+  // Muda o microfone (dispositivo/ruído) com a voz ligada
+  async function reopenMic() {
+    if (!local.mic || local.mic.muted) return;
+    await setMicMuted(true);
+    await setMicMuted(false);
+  }
+
+  // ---------- Ouvir os amigos ----------
+  function voiceVolume(name) {
+    try {
+      const v = JSON.parse(localStorage.getItem('telao.volumes') || '{}')[name];
+      return typeof v === 'number' ? v : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  function saveVoiceVolume(name, v) {
+    try {
+      const all = JSON.parse(localStorage.getItem('telao.volumes') || '{}');
+      all[name] = v;
+      localStorage.setItem('telao.volumes', JSON.stringify(all));
+    } catch {}
+  }
+
+  function attachVoice(peer, stream) {
+    const key = `${peer.id}:${stream.id}`;
+    if (voices.has(key)) return voices.get(key);
+    const audio = new Audio();
+    audio.autoplay = true;
+    audio.srcObject = stream;
+    audio.volume = voiceVolume(peer.name);
+    audio.muted = deafened;
+    audio.hidden = true;
+    document.body.append(audio);
+    const v = { peerId: peer.id, stream, audio };
+    voices.set(key, v);
+    audio.play().catch(() => unlockAudioOnClick());
+    stream.onremovetrack = () => {
+      if (!stream.getTracks().length) removeVoice(key);
+    };
+    watchLevel(peer.id, stream);
+    renderPeople();
+    return v;
+  }
+
+  function removeVoice(key) {
+    const v = voices.get(key);
+    if (!v) return;
+    voices.delete(key);
+    v.audio.srcObject = null;
+    v.audio.remove();
+    if (![...voices.values()].some((x) => x.peerId === v.peerId)) stopLevel(v.peerId);
+    renderPeople();
+  }
+
+  let unlockArmed = false;
+  function unlockAudioOnClick() {
+    if (unlockArmed) return;
+    unlockArmed = true;
+    toast('Clique em qualquer lugar da página para ouvir a voz dos amigos.');
+    document.addEventListener(
+      'click',
+      () => {
+        unlockArmed = false;
+        resumeAudio();
+        for (const v of voices.values()) v.audio.play().catch(() => {});
+      },
+      { once: true }
+    );
+  }
+
+  function setDeafened(on) {
+    deafened = on;
+    for (const v of voices.values()) v.audio.muted = on;
+    for (const t of tiles.values()) if (!t.local) t.video.muted = on;
+    updateButtons();
+    renderPeople();
+    if (on) toast('Você não está ouvindo ninguém. Clique em "Ouvir" para voltar.');
+  }
+
+  // ---------- Quem está falando ----------
+  let audioCtx = null;
+  const levels = new Map(); // id ('me' ou peerId) -> { source, analyser, data, speaking, quietSince }
+
+  function resumeAudio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch {}
+  }
+
+  function watchLevel(id, stream) {
+    stopLevel(id);
+    resumeAudio();
+    if (!audioCtx || !stream.getAudioTracks().length) return;
+    try {
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      levels.set(id, { source, analyser, data: new Float32Array(analyser.fftSize), speaking: false, quietSince: 0 });
+    } catch (err) {
+      console.warn('Sem indicador de fala', err);
+    }
+  }
+
+  function stopLevel(id) {
+    const l = levels.get(id);
+    if (!l) return;
+    try { l.source.disconnect(); } catch {}
+    levels.delete(id);
+    setSpeaking(id, false);
+  }
+
+  function setSpeaking(id, on) {
+    const chip = document.querySelector(`.person[data-id="${CSS.escape(id)}"]`);
+    if (chip) chip.classList.toggle('speaking', on);
+  }
+
+  setInterval(() => {
+    const now = performance.now();
+    for (const [id, l] of levels) {
+      l.analyser.getFloatTimeDomainData(l.data);
+      let sum = 0;
+      for (let i = 0; i < l.data.length; i++) sum += l.data[i] * l.data[i];
+      const rms = Math.sqrt(sum / l.data.length);
+      const loud = rms > 0.015;
+      if (loud) {
+        l.quietSince = 0;
+        if (!l.speaking) { l.speaking = true; setSpeaking(id, true); }
+      } else if (l.speaking) {
+        if (!l.quietSince) l.quietSince = now;
+        else if (now - l.quietSince > 350) { l.speaking = false; setSpeaking(id, false); }
+      }
+    }
+  }, 80);
 
   // Aplica taxa de bits / fps máximos nos envios (em fila para não atropelar)
   function queueSenderParams(peer) {
@@ -580,7 +859,8 @@
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: screenVideoConstraints(),
         audio: settings.screenAudio
-          ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+          // restrictOwnAudio: não captura o som do próprio Telão (a voz dos amigos) junto com a tela
+          ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true, suppressLocalAudioPlayback: false }
           : false,
         systemAudio: settings.screenAudio ? 'include' : 'exclude',
         selfBrowserSurface: 'exclude',
@@ -877,7 +1157,7 @@
     tiles.set(key, t);
 
     video.srcObject = opts.stream;
-    if (t.local) video.muted = true;
+    if (t.local || deafened) video.muted = true;
     playWithFallback(video);
 
     el.addEventListener('click', (e) => {
@@ -910,7 +1190,9 @@
       document.addEventListener(
         'click',
         () => {
-          for (const t of tiles.values()) if (!t.local) t.video.muted = false;
+          for (const t of tiles.values()) if (!t.local) t.video.muted = deafened;
+          resumeAudio();
+          for (const v of voices.values()) v.audio.play().catch(() => {});
         },
         { once: true }
       );
@@ -1206,9 +1488,13 @@
     return `hsl(${h} 70% 62%)`;
   }
 
-  function personChip(name, state, isMe, live) {
+  const MIC_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z"/></svg>';
+  const MIC_OFF_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 11h-2c0 .7-.1 1.3-.4 1.9l1.5 1.5A7 7 0 0 0 19 11zM15 11V5a3 3 0 0 0-5.9-.8L15 10.1zM4.3 3 3 4.3l6 6V11a3 3 0 0 0 4.4 2.7l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 3.4-1.3l3.3 3.3 1.3-1.3z"/></svg>';
+
+  function personChip({ id, name, state, isMe, live, mic }) {
     const el = document.createElement('div');
     el.className = 'person' + (isMe ? ' me' : '');
+    el.dataset.id = id;
     const av = document.createElement('span');
     av.className = 'avatar';
     av.style.background = colorFor(name);
@@ -1216,6 +1502,23 @@
     const label = document.createElement('span');
     label.textContent = isMe ? `${name} (você)` : name;
     el.append(av, label);
+    if (mic) {
+      const m = document.createElement('span');
+      m.className = 'mic-state' + (mic === 'muted' ? ' muted' : '');
+      m.title = mic === 'muted' ? 'Microfone mutado' : 'Na voz';
+      m.innerHTML = mic === 'muted' ? MIC_OFF_ICON : MIC_ICON;
+      el.append(m);
+    }
+    const l = levels.get(id);
+    if (l && l.speaking) el.classList.add('speaking');
+    if (!isMe && mic) {
+      el.classList.add('clickable');
+      el.title = 'Clique para ajustar o volume';
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openVolumePopover(id, el);
+      });
+    }
     if (live) {
       const b = document.createElement('span');
       b.className = 'badge live';
@@ -1238,14 +1541,76 @@
     return el;
   }
 
+  function micStateOf(meta) {
+    const kinds = Object.values(meta || {});
+    if (kinds.includes('mic')) return 'on';
+    if (kinds.includes('mic-muted')) return 'muted';
+    return null;
+  }
+
   function renderPeople() {
     const box = $('#people');
     box.innerHTML = '';
-    box.append(personChip(myName, null, true, !!(local.screen || local.camera || nativeLive)));
+    box.append(personChip({
+      id: 'me',
+      name: myName,
+      isMe: true,
+      live: !!(local.screen || local.camera || nativeLive),
+      mic: local.mic ? (local.mic.muted ? 'muted' : 'on') : null,
+    }));
     for (const p of peers.values()) {
-      box.append(personChip(p.name, p.pc.connectionState, false, Object.keys(p.meta || {}).length > 0));
+      const kinds = Object.values(p.meta || {});
+      box.append(personChip({
+        id: p.id,
+        name: p.name,
+        state: p.pc.connectionState,
+        isMe: false,
+        live: kinds.includes('screen') || kinds.includes('camera'),
+        mic: micStateOf(p.meta),
+      }));
     }
   }
+
+  // Volume da voz de cada amigo (fica salvo pelo nome)
+  function openVolumePopover(peerId, anchor) {
+    closeVolumePopover();
+    const peer = peers.get(peerId);
+    if (!peer) return;
+    const pop = document.createElement('div');
+    pop.className = 'vol-pop';
+    pop.id = 'volPop';
+    const title = document.createElement('div');
+    title.className = 'vol-pop-title';
+    title.textContent = `Volume de ${peer.name}`;
+    const row = document.createElement('div');
+    row.className = 'vol-pop-row';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '0';
+    range.max = '100';
+    range.value = String(Math.round(voiceVolume(peer.name) * 100));
+    const val = document.createElement('span');
+    val.textContent = `${range.value}%`;
+    range.addEventListener('input', () => {
+      const v = Number(range.value) / 100;
+      val.textContent = `${range.value}%`;
+      saveVoiceVolume(peer.name, v);
+      for (const voice of voices.values()) if (voice.peerId === peerId) voice.audio.volume = v;
+    });
+    row.append(range, val);
+    pop.append(title, row);
+    pop.addEventListener('click', (e) => e.stopPropagation());
+    document.body.append(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = `${r.bottom + 8}px`;
+    pop.style.left = `${Math.max(16, Math.min(r.left, window.innerWidth - pop.offsetWidth - 16))}px`;
+  }
+
+  function closeVolumePopover() {
+    const p = document.getElementById('volPop');
+    if (p) p.remove();
+  }
+  document.addEventListener('click', closeVolumePopover);
 
   // =========================================================
   // Controles
@@ -1262,8 +1627,35 @@
     scr.querySelector('span').textContent = screenOn ? 'Parar transmissão' : 'Transmitir tela';
     // Virar câmera: só no celular, com a câmera ligada
     $('#btnFlip').hidden = !(IS_MOBILE && local.camera);
+
+    const mic = $('#btnMic');
+    const micOn = !!(local.mic && !local.mic.muted);
+    mic.classList.toggle('on', micOn);
+    mic.classList.toggle('muted', !!(local.mic && local.mic.muted));
+    mic.querySelector('.ico').innerHTML = local.mic && local.mic.muted ? MIC_OFF_ICON : MIC_ICON;
+    mic.querySelector('span').textContent = !local.mic ? 'Entrar na voz' : micOn ? 'Mutar' : 'Desmutar';
+    mic.title = !local.mic ? 'Entrar na voz (liga o microfone)' : micOn ? 'Mutar o microfone (M)' : 'Desmutar o microfone (M)';
+    const deaf = $('#btnDeafen');
+    deaf.classList.toggle('muted', deafened);
+    deaf.querySelector('span').textContent = deafened ? 'Ouvir' : 'Silenciar';
+    deaf.title = deafened ? 'Voltar a ouvir todo mundo' : 'Parar de ouvir todo mundo';
     updateWakeLock();
   }
+
+  $('#btnMic').addEventListener('click', () => {
+    if (!local.mic) joinVoice();
+    else setMicMuted(!local.mic.muted);
+  });
+  $('#btnDeafen').addEventListener('click', () => setDeafened(!deafened));
+  // Atalho: M muta/desmuta (fora de campos de texto)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'm' && e.key !== 'M') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || $('#app').hidden) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+    if (!local.mic) joinVoice();
+    else setMicMuted(!local.mic.muted);
+  });
 
   $('#btnCam').addEventListener('click', () => (local.camera ? stopCamera() : startCamera()));
   $('#btnFlip').addEventListener('click', () => flipCamera());
@@ -1273,6 +1665,7 @@
     clearTimeout(reconnectTimer);
     stopScreen();
     stopCamera();
+    leaveVoice();
     if (ws) ws.close();
     location.reload();
   });
@@ -1297,7 +1690,10 @@
     e.stopPropagation();
     panel.hidden = !panel.hidden;
     $('#btnQuality').classList.toggle('on', !panel.hidden);
-    if (!panel.hidden) populateCameras();
+    if (!panel.hidden) {
+      populateCameras();
+      populateMics();
+    }
   });
   document.addEventListener('click', (e) => {
     if (!panel.hidden && !panel.contains(e.target) && !e.target.closest('#btnQuality')) {
@@ -1328,6 +1724,44 @@
       settings.screenAudio = audio.checked;
       saveSettings();
     });
+
+    // Voz: microfone e redução de ruído
+    const micSel = $('#micDevice');
+    micSel.value = settings.micDevice || '';
+    micSel.addEventListener('change', () => {
+      settings.micDevice = micSel.value;
+      saveSettings();
+      reopenMic();
+    });
+    const ns = $('#noiseSuppression');
+    ns.checked = settings.noiseSuppression !== false;
+    ns.addEventListener('change', () => {
+      settings.noiseSuppression = ns.checked;
+      saveSettings();
+      reopenMic();
+    });
+  }
+
+  async function populateMics() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try {
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+      const sel = $('#micDevice');
+      sel.innerHTML = '';
+      const def = document.createElement('option');
+      def.value = '';
+      def.textContent = 'Padrão';
+      sel.append(def);
+      devices.forEach((d, i) => {
+        if (!d.deviceId || d.deviceId === 'default' || d.deviceId === 'communications') return;
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || `Microfone ${i + 1}`;
+        sel.append(o);
+      });
+      sel.value = settings.micDevice || '';
+      if (sel.value !== (settings.micDevice || '')) sel.value = '';
+    } catch {}
   }
 
   async function populateCameras() {
@@ -1352,9 +1786,12 @@
     } catch {}
   }
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-    navigator.mediaDevices.addEventListener('devicechange', populateCameras);
+    navigator.mediaDevices.addEventListener('devicechange', () => {
+      populateCameras();
+      populateMics();
+    });
   }
 
   // Atalho para testes/depuração no console
-  window.telao = { peers, tiles, local, settings, codecs: () => ({ autoCodec, gpuCodecs }) };
+  window.telao = { peers, tiles, local, settings, voices, levels, codecs: () => ({ autoCodec, gpuCodecs }) };
 })();

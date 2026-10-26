@@ -84,6 +84,18 @@ Taxa automática usada para a tela:
 | 1080p | 2,7 Mbps | 4,5 Mbps | 7,2 Mbps |
 | 1440p / Original | 4,8 Mbps | 8 Mbps | 12,8 Mbps |
 
+## Voz
+
+O Telão tem chat de voz próprio, então dá para usar sem o Discord.
+
+- **Entrar na voz** liga o microfone. Depois o mesmo botão vira **Mutar/Desmutar** (atalho: tecla M). Mutado, o microfone fica desligado de verdade.
+- **Silenciar** para de ouvir todo mundo (voz e som das transmissões). **Ouvir** volta.
+- Quem está falando ganha um contorno verde no topo; o ícone vermelho de microfone indica quem está mutado.
+- Clique no nome de alguém para ajustar o volume da voz dessa pessoa (fica salvo).
+- Em **Qualidade → Voz** dá para escolher o microfone e ligar/desligar a redução de ruído.
+- Use fone de ouvido. Se for transmitir a tela inteira com áudio, prefira compartilhar só uma aba: senão o som do Discord (se estiver aberto) vai junto.
+- No app de Android, a voz continua funcionando com o app em segundo plano (aparece a notificação "Na voz do Telão").
+
 ## Deixar a transmissão mais fluida
 
 O canto de cada vídeo mostra o que está acontecendo. No seu próprio vídeo aparece algo como `1920×1080 · 60 fps · 6,1 Mbps · H.264 GPU`. Se aparecer em laranja `limite: processador` ou `limite: internet`, é ali que está o gargalo.
