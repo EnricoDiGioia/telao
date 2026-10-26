@@ -30,6 +30,10 @@ npx wrangler deploy
 
 No final aparece o endereço do Telão. Esse é o link que você manda para os amigos. Para atualizar depois de mudar algo no código, é só rodar `publicar.bat` de novo; o endereço continua o mesmo.
 
+**Publicação automática:** o Worker `telao` está ligado a este repositório do GitHub (Cloudflare → Workers & Pages → telao → Settings → Builds). Cada mudança enviada para a branch `main` publica o site sozinha em 1 ou 2 minutos, sem precisar do `publicar.bat`.
+
+Endereço atual: https://telao.ricodigioia.workers.dev
+
 Se quiser que outra pessoa também possa publicar atualizações, adicione ela como membro na sua conta Cloudflare (Manage Account → Members), ou coloque o projeto no GitHub e conecte o repositório ao Worker no painel da Cloudflare (Workers & Pages → telao → Settings → Builds), assim cada push publica sozinho.
 
 ## Como usar
