@@ -34,6 +34,9 @@
   const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const IS_MOBILE = IS_ANDROID || IS_IOS || !!(navigator.userAgentData && navigator.userAgentData.mobile);
   const IS_FIREFOX = /Firefox\//.test(UA);
+  // Direção dos canais que eu abro para enviar. No Firefox, canais "só envio" chegaram a codificar
+  // sem nenhum pacote sair; "envio e recebimento" é o formato que sempre funcionou nele.
+  const SEND_DIRECTION = IS_FIREFOX || /[?&]sendrecv\b/.test(location.search) ? 'sendrecv' : 'sendonly';
 
   // O Chrome do Android tem a função, mas sempre recusa; por isso o Android fica de fora
   // ---------- Dentro do app de Android ----------
@@ -564,7 +567,7 @@
   // o canal aberto para a voz do amigo, e a tela nova não aparecia para ele sem reabrir.)
   function addStreamToPeer(peer, kind, stream) {
     peer.senders[kind] = stream.getTracks().map((track) => {
-      const tr = peer.pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+      const tr = peer.pc.addTransceiver(track, { direction: SEND_DIRECTION, streams: [stream] });
       peer.own.add(tr);
       return tr.sender;
     });
@@ -624,7 +627,7 @@
   function addMicToPeer(peer) {
     if (!local.mic) return;
     const tr = peer.pc.addTransceiver(local.mic.track || 'audio', {
-      direction: 'sendonly',
+      direction: SEND_DIRECTION,
       streams: [local.mic.stream],
     });
     peer.own.add(tr);
