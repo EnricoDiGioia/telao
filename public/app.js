@@ -33,6 +33,7 @@
   const IS_ANDROID = /Android/i.test(UA);
   const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const IS_MOBILE = IS_ANDROID || IS_IOS || !!(navigator.userAgentData && navigator.userAgentData.mobile);
+  const IS_FIREFOX = /Firefox\//.test(UA);
 
   // O Chrome do Android tem a função, mas sempre recusa; por isso o Android fica de fora
   // ---------- Dentro do app de Android ----------
@@ -134,23 +135,34 @@
     const sel = $('#codec');
     if (sel) {
       for (const o of sel.options) {
-        if (o.value === 'auto') o.textContent = `Automática (${CODEC_LABEL[autoCodec]})`;
+        if (o.value === 'auto') o.textContent = IS_FIREFOX ? 'Automática (do navegador)' : `Automática (${gpuCodecs[0] ? CODEC_LABEL[gpuCodecs[0]] : 'padrão do navegador'})`;
         else if (!available.includes(o.value)) { o.disabled = true; o.textContent = `${CODEC_LABEL[o.value]} (indisponível)`; }
         else o.textContent = `${CODEC_LABEL[o.value]}${gpuCodecs.includes(o.value) ? ' · placa de vídeo' : ' · processador'}`;
       }
       if (sel.selectedOptions[0]?.disabled) sel.value = 'auto';
+      if (IS_FIREFOX) {
+        sel.value = 'auto';
+        sel.disabled = true;
+      }
     }
     const note = $('#codecNote');
     if (note) {
-      note.textContent = gpuCodecs.length
+      note.textContent = IS_FIREFOX
+        ? 'No Firefox o formato de vídeo é escolhido pelo próprio navegador. Para usar a placa de vídeo, prefira Chrome ou Edge.'
+        : gpuCodecs.length
         ? `Este PC codifica ${gpuCodecs.map((c) => CODEC_LABEL[c]).join(', ')} pela placa de vídeo, o que deixa a transmissão mais leve e fluida.`
         : 'O navegador não informou codificação pela placa de vídeo neste PC; a transmissão usa o processador. Se travar, baixe resolução ou fps.';
     }
     for (const peer of peers.values()) queueSenderParams(peer);
   }
 
+  // Qual formato forçar no envio (null = deixa o navegador escolher, normalmente VP8).
+  // Firefox: nunca força (o H.264 dele depende de um plugin e pode não enviar nada).
+  // Automático: só força quando o navegador diz que a placa de vídeo codifica aquele formato.
   function chosenCodec() {
-    return settings.codec === 'auto' ? autoCodec : settings.codec;
+    if (IS_FIREFOX) return null;
+    if (settings.codec !== 'auto') return settings.codec;
+    return gpuCodecs[0] || null;
   }
 
   // Escolhe, entre os codecs combinados com o amigo, o que eu quero usar para enviar
@@ -827,7 +839,8 @@
         if (!p.encodings || !p.encodings.length) continue;
         p.encodings[0].maxBitrate = maxBitrate;
         p.encodings[0].maxFramerate = maxFramerate;
-        const codec = findCodec(p.codecs, chosenCodec());
+        const want = peer.noForcedCodec ? null : chosenCodec();
+        const codec = want ? findCodec(p.codecs, want) : null;
         if (codec) p.encodings[0].codec = codec;
         else delete p.encodings[0].codec;
         if (kind === 'screen') {
@@ -851,6 +864,34 @@
       }
     }
   }
+
+  // Vigia: se forcei um formato e o vídeo não está saindo (conectado, mas nenhum byte
+  // enviado por ~6 s), desiste do formato para aquele amigo e volta ao padrão do navegador.
+  const sendWatch = new WeakMap(); // sender -> { bytes, since }
+  setInterval(async () => {
+    for (const peer of peers.values()) {
+      if (peer.noForcedCodec || !chosenCodec() || peer.pc.connectionState !== 'connected') continue;
+      for (const kind of ['screen', 'camera']) {
+        for (const sender of peer.senders[kind]) {
+          if (!sender.track || sender.track.kind !== 'video' || sender.track.readyState !== 'live') continue;
+          let bytes = 0;
+          try {
+            const r = await sender.getStats();
+            r.forEach((s) => { if (s.type === 'outbound-rtp') bytes += s.bytesSent || 0; });
+          } catch { continue; }
+          const now = Date.now();
+          const w = sendWatch.get(sender);
+          if (!w || bytes > w.bytes) {
+            sendWatch.set(sender, { bytes, since: now });
+          } else if (now - w.since > 6000) {
+            console.warn(`Vídeo não saía para ${peer.name} com ${chosenCodec()}; voltando ao formato padrão`);
+            peer.noForcedCodec = true;
+            queueSenderParams(peer);
+          }
+        }
+      }
+    }
+  }, 2000);
 
   // =========================================================
   // Transmitir tela / câmera
