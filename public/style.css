@@ -295,6 +295,19 @@ button, input, select { font: inherit; color: inherit; }
 .check input { accent-color: var(--accent); width: 16px; height: 16px; }
 .panel-note { margin: 14px 0 0; font-size: 12px; color: var(--muted); }
 
+/* ---------- Versão nova ---------- */
+.update-bar {
+  position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%);
+  z-index: 60;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
+  width: max-content; max-width: calc(100vw - 32px);
+  background: var(--bg-3); border: 1px solid var(--accent);
+  border-radius: 12px; padding: 10px 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,.5);
+  animation: in .2s ease-out;
+}
+.update-bar span { font-size: 14px; }
+
 /* ---------- Avisos ---------- */
 .toasts {
   position: fixed; top: 14px; left: 50%; transform: translateX(-50%);

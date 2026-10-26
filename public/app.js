@@ -1895,5 +1895,100 @@
   }
 
   // Atalho para testes/depuração no console
-  window.telao = { peers, tiles, local, settings, voices, levels, codecs: () => ({ autoCodec, gpuCodecs }) };
+  // =========================================================
+  // Versão nova do Telão
+  // Confere de tempos em tempos se os arquivos do site mudaram. Se mudaram, avisa
+  // (sem recarregar sozinho, para não derrubar ninguém no meio da transmissão).
+  // =========================================================
+  const VERSION_FILES = ['app.js', 'index.html', 'style.css'];
+  let loadedVersion = null;
+  let updateShown = false;
+
+  function hashText(s) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36) + ':' + s.length;
+  }
+
+  async function siteVersion() {
+    const base = location.pathname.replace(/[^/]*$/, '');
+    const parts = await Promise.all(
+      VERSION_FILES.map((f) =>
+        fetch(`${base}${f}?v=${Date.now()}`, { cache: 'no-store' }).then((r) => (r.ok ? r.text() : Promise.reject(new Error(r.status))))
+      )
+    );
+    return hashText(parts.join('\n'));
+  }
+
+  async function checkVersion() {
+    if (updateShown) return true;
+    try {
+      const v = await siteVersion();
+      if (!loadedVersion) {
+        loadedVersion = v;
+        return false;
+      }
+      if (v !== loadedVersion) {
+        showUpdateBar();
+        return true;
+      }
+    } catch {} // sem internet agora: tenta de novo depois
+    return false;
+  }
+
+  function showUpdateBar() {
+    if (updateShown) return;
+    updateShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'update-bar';
+    bar.id = 'updateBar';
+    const text = document.createElement('span');
+    text.textContent = 'Saiu uma versão nova do Telão. Atualize para continuar se entendendo com os amigos.';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'btn primary small';
+    go.textContent = 'Atualizar';
+    go.addEventListener('click', updateNow);
+    const later = document.createElement('button');
+    later.type = 'button';
+    later.className = 'btn ghost small';
+    later.textContent = 'Depois';
+    later.addEventListener('click', () => bar.remove());
+    bar.append(text, go, later);
+    document.body.append(bar);
+  }
+
+  // Recarrega e volta sozinho para a mesma sala (e para a voz, se estava nela)
+  function updateNow() {
+    try {
+      if (!$('#app').hidden) {
+        sessionStorage.setItem('telao.autojoin', '1');
+        if (local.mic && !local.mic.muted) sessionStorage.setItem('telao.rejoinVoice', '1');
+      }
+    } catch {}
+    leaving = true;
+    try { if (ws) ws.close(); } catch {}
+    location.reload();
+  }
+
+  // Primeira leitura logo ao abrir; depois a cada 3 minutos e quando a pessoa volta para a aba
+  checkVersion();
+  setInterval(checkVersion, 3 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkVersion();
+  });
+
+  // Voltando de uma atualização: entra de novo na mesma sala
+  try {
+    if (sessionStorage.getItem('telao.autojoin') && $('#nameInput').value.trim() && params.get('sala')) {
+      sessionStorage.removeItem('telao.autojoin');
+      const rejoinVoice = sessionStorage.getItem('telao.rejoinVoice');
+      sessionStorage.removeItem('telao.rejoinVoice');
+      $('#joinForm').requestSubmit();
+      toast('Telão atualizado!');
+      if (rejoinVoice) setTimeout(() => { if (!local.mic) joinVoice(); }, 800);
+    }
+  } catch {}
+
+  window.telao = { peers, tiles, local, settings, voices, levels, checkVersion, codecs: () => ({ autoCodec, gpuCodecs }) };
 })();
