@@ -46,7 +46,7 @@ jobs:
         working-directory: android
         env:
           # Endereço do Telão embutido no app (Settings → Secrets and variables → Actions → Variables)
-          TELAO_URL: ${{ vars.TELAO_URL }}
+          TELAO_URL: ${{ vars.TELAO_URL || 'https://telao.ricodigioia.workers.dev' }}
           TELAO_KEYSTORE_PASSWORD: ${{ secrets.TELAO_KEYSTORE_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 

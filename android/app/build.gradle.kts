@@ -18,6 +18,8 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        // Só celulares de verdade (ARM): o APK fica com menos da metade do tamanho
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
     }
 
