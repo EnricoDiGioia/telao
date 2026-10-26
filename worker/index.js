@@ -24,8 +24,49 @@ export default {
   },
 };
 
-function iceServers(env) {
-  const list = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+// Servidores para atravessar a rede de cada um:
+// - STUN: descobre o endereço público (conexão direta, a maioria dos casos)
+// - TURN da Cloudflare: retransmite o vídeo quando a rede bloqueia conexão direta
+//   (CGNAT, 4G, firewall). Precisa de TURN_KEY_ID (em wrangler.toml) e do segredo
+//   TURN_KEY_API_TOKEN. As credenciais geradas valem 24 h e ficam guardadas por 12 h.
+let turnCache = null; // { servers, until }
+
+async function iceServers(env) {
+  const list = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+
+  if (env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN) {
+    if (!turnCache || turnCache.until < Date.now()) {
+      try {
+        const res = await fetch(
+          `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ttl: 86400 }),
+          }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const servers = (data.iceServers || [])
+            .map((s) => {
+              const urls = (Array.isArray(s.urls) ? s.urls : [s.urls])
+                // navegadores bloqueiam a porta 53: tira para não esperar à toa
+                .filter((u) => typeof u === 'string' && !/:53(\?|$)/.test(u));
+              return { ...s, urls };
+            })
+            .filter((s) => s.urls.length && s.urls.some((u) => u.startsWith('turn')));
+          if (servers.length) turnCache = { servers, until: Date.now() + 12 * 3600 * 1000 };
+        } else {
+          console.log('TURN: a Cloudflare recusou gerar credenciais', res.status);
+        }
+      } catch (err) {
+        console.log('TURN: falha ao gerar credenciais', String(err));
+      }
+    }
+    if (turnCache) list.push(...turnCache.servers);
+  }
+
+  // TURN de outro provedor (opcional)
   if (env.TURN_URL) {
     list.push({
       urls: String(env.TURN_URL).split(',').map((s) => s.trim()),
@@ -65,7 +106,13 @@ export class Room extends DurableObject {
   }
 
   send(ws, msg) {
-    try { ws.send(JSON.stringify(msg)); } catch {}
+    try {
+      ws.send(JSON.stringify(msg));
+      return true;
+    } catch (err) {
+      console.log('falha ao enviar mensagem', msg && msg.type, String(err));
+      return false;
+    }
   }
 
   async webSocketMessage(ws, raw) {
@@ -76,6 +123,10 @@ export class Room extends DurableObject {
     if (!me) return;
 
     if (msg.type === 'join' && !me.joined) {
+      // Primeiro as credenciais (pode precisar falar com a Cloudflare); depois olha quem está na sala
+      const ice = await iceServers(this.env);
+      const fresh = ws.deserializeAttachment();
+      if (!fresh || fresh.joined) return;
       const max = Number(this.env.MAX_PER_ROOM) || 8;
       const others = this.members(ws);
       if (others.length >= max) {
@@ -90,7 +141,7 @@ export class Room extends DurableObject {
       this.send(ws, {
         type: 'welcome',
         id: me.id,
-        iceServers: iceServers(this.env),
+        iceServers: ice,
         peers: others.map(({ a }) => ({ id: a.id, name: a.name, streams: a.streams })),
       });
       for (const { ws: other } of others) this.send(other, { type: 'peer-joined', id: me.id, name: me.name });
@@ -101,7 +152,13 @@ export class Room extends DurableObject {
 
     if (msg.type === 'signal') {
       const target = this.members(ws).find(({ a }) => a.id === String(msg.to));
-      if (target) this.send(target.ws, { type: 'signal', from: me.id, data: msg.data });
+      if (target) {
+        if (!this.send(target.ws, { type: 'signal', from: me.id, data: msg.data })) {
+          console.log(`[${me.name}] sinal NÃO entregue para ${msg.to}: falha ao enviar`);
+        }
+      } else {
+        console.log(`[${me.name}] sinal NÃO entregue: ${msg.to} não está mais na sala`);
+      }
     } else if (msg.type === 'meta') {
       if (msg.name) me.name = String(msg.name).trim().slice(0, 32) || me.name;
       me.streams = msg.streams && typeof msg.streams === 'object' ? msg.streams : {};
@@ -121,12 +178,18 @@ export class Room extends DurableObject {
     for (const { ws: other } of this.members(ws)) this.send(other, { type: 'peer-left', id: me.id });
   }
 
-  async webSocketClose(ws, code) {
+  async webSocketClose(ws, code, reason, wasClean) {
+    let me;
+    try { me = ws.deserializeAttachment(); } catch {}
+    if (!wasClean) console.log(`[${me?.name || '?'}] desconectou sem fechar direito (código ${code})`);
     this.leave(ws);
     try { ws.close(code === 1005 ? 1000 : code, 'tchau'); } catch {}
   }
 
-  async webSocketError(ws) {
+  async webSocketError(ws, error) {
+    let me;
+    try { me = ws.deserializeAttachment(); } catch {}
+    console.log(`[${me?.name || '?'}] erro na conexão com o servidor: ${String(error)}`);
     this.leave(ws);
   }
 }

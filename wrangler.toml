@@ -15,8 +15,16 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
+# Registros (logs) do servidor no painel da Cloudflare: Workers & Pages → telao → Observability
+[observability]
+enabled = true
+
 [vars]
 MAX_PER_ROOM = "8"
+# Servidor TURN da Cloudflare (retransmite quando a rede bloqueia conexão direta).
+# O ID da chave fica aqui; o token vai como segredo no painel ou com:
+#   npx wrangler secret put TURN_KEY_API_TOKEN
+TURN_KEY_ID = ""
 # Servidor TURN opcional (veja o README). A senha vai como segredo:
 #   npx wrangler secret put TURN_PASS
 # TURN_URL = "turn:endereco:3478,turns:endereco:443"

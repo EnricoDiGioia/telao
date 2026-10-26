@@ -24,6 +24,8 @@
     codec: 'auto',
     playback: 'realtime',
     camFacing: 'user',
+    micDevice: '',
+    noiseSuppression: true,
   };
 
   // ---------- Que aparelho é este ----------
@@ -31,6 +33,7 @@
   const IS_ANDROID = /Android/i.test(UA);
   const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const IS_MOBILE = IS_ANDROID || IS_IOS || !!(navigator.userAgentData && navigator.userAgentData.mobile);
+  const IS_FIREFOX = /Firefox\//.test(UA);
 
   // O Chrome do Android tem a função, mas sempre recusa; por isso o Android fica de fora
   // ---------- Dentro do app de Android ----------
@@ -132,23 +135,34 @@
     const sel = $('#codec');
     if (sel) {
       for (const o of sel.options) {
-        if (o.value === 'auto') o.textContent = `Automática (${CODEC_LABEL[autoCodec]})`;
+        if (o.value === 'auto') o.textContent = IS_FIREFOX ? 'Automática (do navegador)' : `Automática (${gpuCodecs[0] ? CODEC_LABEL[gpuCodecs[0]] : 'padrão do navegador'})`;
         else if (!available.includes(o.value)) { o.disabled = true; o.textContent = `${CODEC_LABEL[o.value]} (indisponível)`; }
         else o.textContent = `${CODEC_LABEL[o.value]}${gpuCodecs.includes(o.value) ? ' · placa de vídeo' : ' · processador'}`;
       }
       if (sel.selectedOptions[0]?.disabled) sel.value = 'auto';
+      if (IS_FIREFOX) {
+        sel.value = 'auto';
+        sel.disabled = true;
+      }
     }
     const note = $('#codecNote');
     if (note) {
-      note.textContent = gpuCodecs.length
+      note.textContent = IS_FIREFOX
+        ? 'No Firefox o formato de vídeo é escolhido pelo próprio navegador. Para usar a placa de vídeo, prefira Chrome ou Edge.'
+        : gpuCodecs.length
         ? `Este PC codifica ${gpuCodecs.map((c) => CODEC_LABEL[c]).join(', ')} pela placa de vídeo, o que deixa a transmissão mais leve e fluida.`
         : 'O navegador não informou codificação pela placa de vídeo neste PC; a transmissão usa o processador. Se travar, baixe resolução ou fps.';
     }
     for (const peer of peers.values()) queueSenderParams(peer);
   }
 
+  // Qual formato forçar no envio (null = deixa o navegador escolher, normalmente VP8).
+  // Firefox: nunca força (o H.264 dele depende de um plugin e pode não enviar nada).
+  // Automático: só força quando o navegador diz que a placa de vídeo codifica aquele formato.
   function chosenCodec() {
-    return settings.codec === 'auto' ? autoCodec : settings.codec;
+    if (IS_FIREFOX) return null;
+    if (settings.codec !== 'auto') return settings.codec;
+    return gpuCodecs[0] || null;
   }
 
   // Escolhe, entre os codecs combinados com o amigo, o que eu quero usar para enviar
@@ -200,7 +214,9 @@
   let reconnectTimer = null;
 
   const peers = new Map(); // id -> peer
-  const local = { screen: null, camera: null }; // MediaStreams que EU estou enviando
+  const local = { screen: null, camera: null, mic: null }; // o que EU estou enviando (mic = { stream, track, muted })
+  const voices = new Map(); // chave -> { peerId, stream, audio } (voz de cada amigo)
+  let deafened = false; // "Silenciar": não ouvir ninguém
   const tiles = new Map(); // chave -> tile
   let focusKey = null;
   let pipWindow = null;
@@ -371,8 +387,11 @@
     const streams = {};
     if (local.screen) streams[local.screen.id] = 'screen';
     if (local.camera) streams[local.camera.id] = 'camera';
+    if (local.mic) streams[local.mic.stream.id] = local.mic.muted ? 'mic-muted' : 'mic';
     wsSend({ type: 'meta', name: myName, streams });
   }
+
+  const isMicKind = (k) => typeof k === 'string' && k.startsWith('mic');
 
   function applyMeta(peer, streams, name) {
     if (name) peer.name = name;
@@ -381,10 +400,18 @@
       if (t.ownerId !== peer.id) continue;
       if (!(t.stream.id in streams)) {
         removeTile(key);
+      } else if (isMicKind(streams[t.stream.id])) {
+        // era voz, não vídeo: tira o quadro e toca como voz
+        const stream = t.stream;
+        removeTile(key);
+        attachVoice(peer, stream);
       } else {
         t.kind = streams[t.stream.id];
         updateTileLabel(t);
       }
+    }
+    for (const [key, v] of [...voices]) {
+      if (v.peerId === peer.id && !(v.stream.id in streams)) removeVoice(key);
     }
     renderPeople();
   }
@@ -403,7 +430,9 @@
       polite: String(myId) > String(id),
       makingOffer: false,
       ignoreOffer: false,
-      senders: { screen: [], camera: [] },
+      senders: { screen: [], camera: [], mic: [] },
+      // contagem das mensagens de conexão (para conferir se alguma se perde no caminho)
+      sig: { candSent: 0, candRecv: 0, candAdded: 0, candFailed: 0, descSent: 0, descRecv: 0, sentTypes: {}, recvTypes: {} },
       meta: {},
       paramChain: Promise.resolve(),
       warnedFail: false,
@@ -411,13 +440,18 @@
     peers.set(id, peer);
 
     pc.onicecandidate = ({ candidate }) => {
-      if (candidate) sendSignal(id, { candidate });
+      if (!candidate) return;
+      peer.sig.candSent++;
+      const t = candidate.type || (/ typ (\w+)/.exec(candidate.candidate) || [])[1] || '?';
+      peer.sig.sentTypes[t] = (peer.sig.sentTypes[t] || 0) + 1;
+      sendSignal(id, { candidate });
     };
 
     pc.onnegotiationneeded = async () => {
       try {
         peer.makingOffer = true;
         await pc.setLocalDescription();
+        peer.sig.descSent++;
         sendSignal(id, { description: pc.localDescription });
       } catch (err) {
         console.error('Erro ao negociar', err);
@@ -428,6 +462,25 @@
 
     pc.ontrack = ({ track, streams }) => {
       const stream = streams[0] || new MediaStream([track]);
+      const kind = peer.meta[stream.id];
+      if (isMicKind(kind)) {
+        attachVoice(peer, stream);
+        return;
+      }
+      // Só áudio e ainda sem saber o que é: espera o aviso de "meta" chegar antes de decidir
+      if (kind === undefined && track.kind === 'audio' && !stream.getVideoTracks().length) {
+        setTimeout(() => {
+          if (!peers.has(peer.id)) return;
+          const k = peer.meta[stream.id];
+          if (isMicKind(k) || (k === undefined && !stream.getVideoTracks().length)) attachVoice(peer, stream);
+          else showRemoteStream(peer, stream);
+        }, 500);
+        return;
+      }
+      showRemoteStream(peer, stream);
+    };
+
+    const showRemoteStream = (peer, stream) => {
       const key = `${peer.id}:${stream.id}`;
       const isNew = !tiles.has(key);
       const t = ensureTile(key, { stream, ownerId: peer.id, kind: peer.meta[stream.id], local: false });
@@ -460,14 +513,27 @@
     for (const kind of ['screen', 'camera']) {
       if (local[kind]) addStreamToPeer(peer, kind, local[kind]);
     }
+    if (local.mic) addMicToPeer(peer);
     return peer;
   }
 
-  async function handleSignal(from, { description, candidate }) {
+  async function handleSignal(from, data) {
+    const { description, candidate } = data;
+    // Diagnóstico remoto: alguém da sala pediu um relatório técnico do meu envio
+    if (data.diag === 'request') {
+      try { sendSignal(from, { diag: 'report', report: await buildDiag() }); } catch (err) { console.warn('diag', err); }
+      return;
+    }
+    if (data.diag === 'report') {
+      window.__telaoDiag = window.__telaoDiag || {};
+      window.__telaoDiag[from] = data.report;
+      return;
+    }
     const peer = peers.get(from) || createPeer(from, '…');
     const pc = peer.pc;
     try {
       if (description) {
+        peer.sig.descRecv++;
         const offerCollision =
           description.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
         peer.ignoreOffer = !peer.polite && offerCollision;
@@ -476,13 +542,19 @@
         await pc.setRemoteDescription(description);
         if (description.type === 'offer') {
           await pc.setLocalDescription();
+          peer.sig.descSent++;
           sendSignal(from, { description: pc.localDescription });
         }
         queueSenderParams(peer);
       } else if (candidate) {
+        peer.sig.candRecv++;
+        const t = candidate.type || (/ typ (\w+)/.exec(candidate.candidate || '') || [])[1] || '?';
+        peer.sig.recvTypes[t] = (peer.sig.recvTypes[t] || 0) + 1;
         try {
           await pc.addIceCandidate(candidate);
+          peer.sig.candAdded++;
         } catch (err) {
+          peer.sig.candFailed++;
           if (!peer.ignoreOffer) console.warn('Candidato ICE recusado', err);
         }
       }
@@ -497,6 +569,7 @@
     try { peer.pc.close(); } catch {}
     peers.delete(id);
     for (const [key, t] of [...tiles]) if (t.ownerId === id) removeTile(key);
+    for (const [key, v] of [...voices]) if (v.peerId === id) removeVoice(key);
     renderPeople();
   }
 
@@ -510,6 +583,255 @@
     }
     peer.senders[kind] = [];
   }
+
+  // =========================================================
+  // Voz
+  // Cada amigo recebe um canal de áudio só meu. Mutar troca o microfone por "nada"
+  // (replaceTrack), sem renegociar: é instantâneo e desliga o microfone de verdade.
+  // =========================================================
+  function micConstraints() {
+    const c = {
+      echoCancellation: true,
+      noiseSuppression: settings.noiseSuppression !== false,
+      autoGainControl: true,
+    };
+    if (settings.micDevice) c.deviceId = { exact: settings.micDevice };
+    return c;
+  }
+
+  async function openMic() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast('Este navegador não deixa usar o microfone aqui (precisa ser https ou localhost).', 'error');
+      return null;
+    }
+    try {
+      return (await navigator.mediaDevices.getUserMedia({ audio: micConstraints() })).getAudioTracks()[0] || null;
+    } catch (err) {
+      if (settings.micDevice && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        settings.micDevice = '';
+        saveSettings();
+        return openMic();
+      }
+      const why = err.name === 'NotAllowedError' ? 'o acesso ao microfone foi negado' : err.message;
+      toast('Não deu para abrir o microfone: ' + why, 'error');
+      return null;
+    }
+  }
+
+  // O canal da voz é de "envio e recebimento": se o amigo começar a transmitir a tela com áudio,
+  // o navegador dele pode reaproveitar este canal para mandar esse áudio, e eu preciso conseguir
+  // receber por ele. (Com "só envio", a tela dele não aparecia para mim sem reabrir.)
+  function addMicToPeer(peer) {
+    if (!local.mic) return;
+    const tr = peer.pc.addTransceiver(local.mic.track || 'audio', {
+      direction: 'sendrecv',
+      streams: [local.mic.stream],
+    });
+    peer.senders.mic = [tr.sender];
+  }
+
+  function watchMicTrack(track) {
+    track.addEventListener('ended', () => {
+      // microfone desconectado: fica como mutado
+      if (local.mic && local.mic.track === track) setMicMuted(true);
+    });
+  }
+
+  async function joinVoice() {
+    const track = await openMic();
+    if (!track) return;
+    watchMicTrack(track);
+    local.mic = { stream: new MediaStream([track]), track, muted: false };
+    broadcastMeta();
+    for (const peer of peers.values()) addMicToPeer(peer);
+    watchLevel('me', local.mic.stream);
+    resumeAudio();
+    updateButtons();
+    renderPeople();
+    populateMics();
+    // No app de Android: mantém o microfone funcionando com o app em segundo plano
+    if (NATIVE && NATIVE.voiceState) NATIVE.voiceState(true);
+  }
+
+  async function setMicMuted(muted) {
+    const mic = local.mic;
+    if (!mic || mic.muted === muted) return;
+    if (muted) {
+      const old = mic.track;
+      mic.track = null;
+      mic.muted = true;
+      for (const peer of peers.values()) for (const s of peer.senders.mic) s.replaceTrack(null).catch(() => {});
+      if (old) {
+        old.stop();
+        mic.stream.removeTrack(old);
+      }
+      stopLevel('me');
+    } else {
+      const track = await openMic();
+      if (!track || !local.mic) return;
+      watchMicTrack(track);
+      mic.track = track;
+      mic.muted = false;
+      mic.stream.addTrack(track);
+      for (const peer of peers.values()) for (const s of peer.senders.mic) s.replaceTrack(track).catch(() => {});
+      watchLevel('me', mic.stream);
+    }
+    broadcastMeta();
+    updateButtons();
+    renderPeople();
+  }
+
+  function leaveVoice() {
+    const mic = local.mic;
+    if (!mic) return;
+    local.mic = null;
+    if (mic.track) mic.track.stop();
+    for (const peer of peers.values()) removeStreamFromPeer(peer, 'mic');
+    stopLevel('me');
+    broadcastMeta();
+    if (NATIVE && NATIVE.voiceState) NATIVE.voiceState(false);
+  }
+
+  // Muda o microfone (dispositivo/ruído) com a voz ligada
+  async function reopenMic() {
+    if (!local.mic || local.mic.muted) return;
+    await setMicMuted(true);
+    await setMicMuted(false);
+  }
+
+  // ---------- Ouvir os amigos ----------
+  function voiceVolume(name) {
+    try {
+      const v = JSON.parse(localStorage.getItem('telao.volumes') || '{}')[name];
+      return typeof v === 'number' ? v : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  function saveVoiceVolume(name, v) {
+    try {
+      const all = JSON.parse(localStorage.getItem('telao.volumes') || '{}');
+      all[name] = v;
+      localStorage.setItem('telao.volumes', JSON.stringify(all));
+    } catch {}
+  }
+
+  function attachVoice(peer, stream) {
+    const key = `${peer.id}:${stream.id}`;
+    if (voices.has(key)) return voices.get(key);
+    const audio = new Audio();
+    audio.autoplay = true;
+    audio.srcObject = stream;
+    audio.volume = voiceVolume(peer.name);
+    audio.muted = deafened;
+    audio.hidden = true;
+    document.body.append(audio);
+    const v = { peerId: peer.id, stream, audio };
+    voices.set(key, v);
+    audio.play().catch(() => unlockAudioOnClick());
+    stream.onremovetrack = () => {
+      if (!stream.getTracks().length) removeVoice(key);
+    };
+    watchLevel(peer.id, stream);
+    renderPeople();
+    return v;
+  }
+
+  function removeVoice(key) {
+    const v = voices.get(key);
+    if (!v) return;
+    voices.delete(key);
+    v.audio.srcObject = null;
+    v.audio.remove();
+    if (![...voices.values()].some((x) => x.peerId === v.peerId)) stopLevel(v.peerId);
+    renderPeople();
+  }
+
+  let unlockArmed = false;
+  function unlockAudioOnClick() {
+    if (unlockArmed) return;
+    unlockArmed = true;
+    toast('Clique em qualquer lugar da página para ouvir a voz dos amigos.');
+    document.addEventListener(
+      'click',
+      () => {
+        unlockArmed = false;
+        resumeAudio();
+        for (const v of voices.values()) v.audio.play().catch(() => {});
+      },
+      { once: true }
+    );
+  }
+
+  function setDeafened(on) {
+    deafened = on;
+    for (const v of voices.values()) v.audio.muted = on;
+    for (const t of tiles.values()) {
+      applyTileMute(t);
+      updateTileAudio(t);
+    }
+    updateButtons();
+    renderPeople();
+    if (on) toast('Você não está ouvindo ninguém. Clique em "Ouvir" para voltar.');
+  }
+
+  // ---------- Quem está falando ----------
+  let audioCtx = null;
+  const levels = new Map(); // id ('me' ou peerId) -> { source, analyser, data, speaking, quietSince }
+
+  function resumeAudio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    } catch {}
+  }
+
+  function watchLevel(id, stream) {
+    stopLevel(id);
+    resumeAudio();
+    if (!audioCtx || !stream.getAudioTracks().length) return;
+    try {
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      levels.set(id, { source, analyser, data: new Float32Array(analyser.fftSize), speaking: false, quietSince: 0 });
+    } catch (err) {
+      console.warn('Sem indicador de fala', err);
+    }
+  }
+
+  function stopLevel(id) {
+    const l = levels.get(id);
+    if (!l) return;
+    try { l.source.disconnect(); } catch {}
+    levels.delete(id);
+    setSpeaking(id, false);
+  }
+
+  function setSpeaking(id, on) {
+    const chip = document.querySelector(`.person[data-id="${CSS.escape(id)}"]`);
+    if (chip) chip.classList.toggle('speaking', on);
+  }
+
+  setInterval(() => {
+    const now = performance.now();
+    for (const [id, l] of levels) {
+      l.analyser.getFloatTimeDomainData(l.data);
+      let sum = 0;
+      for (let i = 0; i < l.data.length; i++) sum += l.data[i] * l.data[i];
+      const rms = Math.sqrt(sum / l.data.length);
+      const loud = rms > 0.015;
+      if (loud) {
+        l.quietSince = 0;
+        if (!l.speaking) { l.speaking = true; setSpeaking(id, true); }
+      } else if (l.speaking) {
+        if (!l.quietSince) l.quietSince = now;
+        else if (now - l.quietSince > 350) { l.speaking = false; setSpeaking(id, false); }
+      }
+    }
+  }, 80);
 
   // Aplica taxa de bits / fps máximos nos envios (em fila para não atropelar)
   function queueSenderParams(peer) {
@@ -527,7 +849,8 @@
         if (!p.encodings || !p.encodings.length) continue;
         p.encodings[0].maxBitrate = maxBitrate;
         p.encodings[0].maxFramerate = maxFramerate;
-        const codec = findCodec(p.codecs, chosenCodec());
+        const want = peer.noForcedCodec ? null : chosenCodec();
+        const codec = want ? findCodec(p.codecs, want) : null;
         if (codec) p.encodings[0].codec = codec;
         else delete p.encodings[0].codec;
         if (kind === 'screen') {
@@ -551,6 +874,34 @@
       }
     }
   }
+
+  // Vigia: se forcei um formato e o vídeo não está saindo (conectado, mas nenhum byte
+  // enviado por ~6 s), desiste do formato para aquele amigo e volta ao padrão do navegador.
+  const sendWatch = new WeakMap(); // sender -> { bytes, since }
+  setInterval(async () => {
+    for (const peer of peers.values()) {
+      if (peer.noForcedCodec || !chosenCodec() || peer.pc.connectionState !== 'connected') continue;
+      for (const kind of ['screen', 'camera']) {
+        for (const sender of peer.senders[kind]) {
+          if (!sender.track || sender.track.kind !== 'video' || sender.track.readyState !== 'live') continue;
+          let bytes = 0;
+          try {
+            const r = await sender.getStats();
+            r.forEach((s) => { if (s.type === 'outbound-rtp') bytes += s.bytesSent || 0; });
+          } catch { continue; }
+          const now = Date.now();
+          const w = sendWatch.get(sender);
+          if (!w || bytes > w.bytes) {
+            sendWatch.set(sender, { bytes, since: now });
+          } else if (now - w.since > 6000) {
+            console.warn(`Vídeo não saía para ${peer.name} com ${chosenCodec()}; voltando ao formato padrão`);
+            peer.noForcedCodec = true;
+            queueSenderParams(peer);
+          }
+        }
+      }
+    }
+  }, 2000);
 
   // =========================================================
   // Transmitir tela / câmera
@@ -580,7 +931,8 @@
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: screenVideoConstraints(),
         audio: settings.screenAudio
-          ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+          // restrictOwnAudio: não captura o som do próprio Telão (a voz dos amigos) junto com a tela
+          ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, restrictOwnAudio: true, suppressLocalAudioPlayback: false }
           : false,
         systemAudio: settings.screenAudio ? 'include' : 'exclude',
         selfBrowserSurface: 'exclude',
@@ -853,8 +1205,11 @@
       <div class="tile-top"><span class="badge live">AO VIVO</span><span class="stats"></span></div>
       <div class="tile-bottom">
         <span class="label"></span>
+        <div class="audio-ctl" hidden>
+          <button class="icon-btn snd" type="button" data-act="mute" aria-label="Som"></button>
+          <input type="range" class="vol" min="0" max="100" step="1" value="100" aria-label="Volume da transmissão">
+        </div>
         <div class="actions">
-          <input type="range" class="vol" min="0" max="1" step="0.05" value="1" title="Volume" aria-label="Volume" hidden>
           ${btn('focus', 'Focar / desfocar', ICON.focus)}
           ${btn('popout', 'Destacar em janela separada', ICON.popout)}
           ${btn('pip', 'Flutuar por cima de tudo', ICON.pip)}
@@ -877,7 +1232,9 @@
     tiles.set(key, t);
 
     video.srcObject = opts.stream;
-    if (t.local) video.muted = true;
+    t.userMuted = false;
+    if (!t.local) video.volume = tileVolume(t);
+    applyTileMute(t);
     playWithFallback(video);
 
     el.addEventListener('click', (e) => {
@@ -887,12 +1244,22 @@
       tileAction(t, b.dataset.act);
     });
     el.addEventListener('dblclick', (e) => {
-      if (e.target.closest('.actions')) return;
+      if (e.target.closest('.actions, .audio-ctl')) return;
       toggleFocus(key);
     });
-    el.querySelector('.vol').addEventListener('input', (e) => {
-      video.volume = Number(e.target.value);
+    const vol = el.querySelector('.vol');
+    vol.value = String(Math.round(video.volume * 100));
+    vol.addEventListener('input', () => {
+      video.volume = Number(vol.value) / 100;
+      // mexer no volume desmuta (como no Discord)
+      if (t.userMuted && video.volume > 0) t.userMuted = false;
+      applyTileMute(t);
+      saveTileVolume(t, video.volume);
+      updateTileAudio(t);
     });
+    // Se o som da transmissão chegar depois (ou sair), atualiza o controle
+    opts.stream.addEventListener('addtrack', () => updateTileAudio(t));
+    opts.stream.addEventListener('removetrack', () => updateTileAudio(t));
 
     $('#stage').append(el);
     updateTileLabel(t);
@@ -910,7 +1277,9 @@
       document.addEventListener(
         'click',
         () => {
-          for (const t of tiles.values()) if (!t.local) t.video.muted = false;
+          for (const t of tiles.values()) applyTileMute(t);
+          resumeAudio();
+          for (const v of voices.values()) v.audio.play().catch(() => {});
         },
         { once: true }
       );
@@ -938,9 +1307,59 @@
     } catch {}
   }
 
+  // ---------- Som de cada transmissão ----------
+  const SND_ON = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg>';
+  const SND_OFF = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm18.7 3-2.5-2.5-1.4 1.4 2.5 2.5-2.5 2.5 1.4 1.4 2.5-2.5 2.5 2.5 1.4-1.4-2.5-2.5 2.5-2.5-1.4-1.4z" transform="translate(-2 0)"/></svg>';
+  const SND_NONE = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm11.6 3.4 1.4-1.4M14 7l7 10" stroke="currentColor" stroke-width="2" fill="none"/><path d="M3 9v6h4l5 5V4L7 9z"/></svg>';
+
+  function tileVolumeKey(t) {
+    return `${peers.get(t.ownerId)?.name || '?'}:${t.kind || 'video'}`;
+  }
+
+  function tileVolume(t) {
+    try {
+      const v = JSON.parse(localStorage.getItem('telao.tileVolumes') || '{}')[tileVolumeKey(t)];
+      return typeof v === 'number' ? v : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  function saveTileVolume(t, v) {
+    try {
+      const all = JSON.parse(localStorage.getItem('telao.tileVolumes') || '{}');
+      all[tileVolumeKey(t)] = v;
+      localStorage.setItem('telao.tileVolumes', JSON.stringify(all));
+    } catch {}
+  }
+
+  function applyTileMute(t) {
+    t.video.muted = t.local || deafened || !!t.userMuted;
+  }
+
   function updateTileAudio(t) {
-    const hasAudio = !t.local && t.stream.getAudioTracks().length > 0;
-    t.el.querySelector('.vol').hidden = !hasAudio;
+    const ctl = t.el.querySelector('.audio-ctl');
+    if (t.local) {
+      ctl.hidden = true;
+      return;
+    }
+    ctl.hidden = false;
+    const hasAudio = t.stream.getAudioTracks().length > 0;
+    const btnSnd = ctl.querySelector('.snd');
+    const vol = ctl.querySelector('.vol');
+    ctl.classList.toggle('no-audio', !hasAudio);
+    vol.disabled = !hasAudio;
+    btnSnd.disabled = !hasAudio;
+    if (!hasAudio) {
+      btnSnd.innerHTML = SND_NONE;
+      btnSnd.title = 'Esta transmissão está sem áudio';
+      vol.title = 'Esta transmissão está sem áudio';
+      return;
+    }
+    const silent = t.userMuted || deafened || t.video.volume === 0;
+    btnSnd.innerHTML = silent ? SND_OFF : SND_ON;
+    btnSnd.title = deafened ? 'Você silenciou tudo (botão Ouvir)' : t.userMuted ? 'Ligar o som' : 'Tirar o som';
+    vol.title = `Volume: ${Math.round(t.video.volume * 100)}%`;
   }
 
   function removeTile(key) {
@@ -976,6 +1395,22 @@
   }
 
   function tileAction(t, act) {
+    if (act === 'mute') {
+      if (deafened) {
+        toast('Você silenciou tudo. Clique em "Ouvir" na barra de baixo para voltar a ouvir.');
+        return;
+      }
+      t.userMuted = !t.userMuted;
+      // desmutar com o volume no zero: volta para um volume audível
+      if (!t.userMuted && t.video.volume === 0) {
+        t.video.volume = 0.5;
+        t.el.querySelector('.vol').value = '50';
+        saveTileVolume(t, 0.5);
+      }
+      applyTileMute(t);
+      updateTileAudio(t);
+      return;
+    }
     if (act === 'focus') toggleFocus(t.key);
     else if (act === 'popout') popout(t);
     else if (act === 'pip') floatPip(t);
@@ -1206,9 +1641,13 @@
     return `hsl(${h} 70% 62%)`;
   }
 
-  function personChip(name, state, isMe, live) {
+  const MIC_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11z"/></svg>';
+  const MIC_OFF_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 11h-2c0 .7-.1 1.3-.4 1.9l1.5 1.5A7 7 0 0 0 19 11zM15 11V5a3 3 0 0 0-5.9-.8L15 10.1zM4.3 3 3 4.3l6 6V11a3 3 0 0 0 4.4 2.7l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 3.4-1.3l3.3 3.3 1.3-1.3z"/></svg>';
+
+  function personChip({ id, name, state, isMe, live, mic }) {
     const el = document.createElement('div');
     el.className = 'person' + (isMe ? ' me' : '');
+    el.dataset.id = id;
     const av = document.createElement('span');
     av.className = 'avatar';
     av.style.background = colorFor(name);
@@ -1216,6 +1655,23 @@
     const label = document.createElement('span');
     label.textContent = isMe ? `${name} (você)` : name;
     el.append(av, label);
+    if (mic) {
+      const m = document.createElement('span');
+      m.className = 'mic-state' + (mic === 'muted' ? ' muted' : '');
+      m.title = mic === 'muted' ? 'Microfone mutado' : 'Na voz';
+      m.innerHTML = mic === 'muted' ? MIC_OFF_ICON : MIC_ICON;
+      el.append(m);
+    }
+    const l = levels.get(id);
+    if (l && l.speaking) el.classList.add('speaking');
+    if (!isMe && mic) {
+      el.classList.add('clickable');
+      el.title = 'Clique para ajustar o volume';
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openVolumePopover(id, el);
+      });
+    }
     if (live) {
       const b = document.createElement('span');
       b.className = 'badge live';
@@ -1238,14 +1694,76 @@
     return el;
   }
 
+  function micStateOf(meta) {
+    const kinds = Object.values(meta || {});
+    if (kinds.includes('mic')) return 'on';
+    if (kinds.includes('mic-muted')) return 'muted';
+    return null;
+  }
+
   function renderPeople() {
     const box = $('#people');
     box.innerHTML = '';
-    box.append(personChip(myName, null, true, !!(local.screen || local.camera || nativeLive)));
+    box.append(personChip({
+      id: 'me',
+      name: myName,
+      isMe: true,
+      live: !!(local.screen || local.camera || nativeLive),
+      mic: local.mic ? (local.mic.muted ? 'muted' : 'on') : null,
+    }));
     for (const p of peers.values()) {
-      box.append(personChip(p.name, p.pc.connectionState, false, Object.keys(p.meta || {}).length > 0));
+      const kinds = Object.values(p.meta || {});
+      box.append(personChip({
+        id: p.id,
+        name: p.name,
+        state: p.pc.connectionState,
+        isMe: false,
+        live: kinds.includes('screen') || kinds.includes('camera'),
+        mic: micStateOf(p.meta),
+      }));
     }
   }
+
+  // Volume da voz de cada amigo (fica salvo pelo nome)
+  function openVolumePopover(peerId, anchor) {
+    closeVolumePopover();
+    const peer = peers.get(peerId);
+    if (!peer) return;
+    const pop = document.createElement('div');
+    pop.className = 'vol-pop';
+    pop.id = 'volPop';
+    const title = document.createElement('div');
+    title.className = 'vol-pop-title';
+    title.textContent = `Volume de ${peer.name}`;
+    const row = document.createElement('div');
+    row.className = 'vol-pop-row';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '0';
+    range.max = '100';
+    range.value = String(Math.round(voiceVolume(peer.name) * 100));
+    const val = document.createElement('span');
+    val.textContent = `${range.value}%`;
+    range.addEventListener('input', () => {
+      const v = Number(range.value) / 100;
+      val.textContent = `${range.value}%`;
+      saveVoiceVolume(peer.name, v);
+      for (const voice of voices.values()) if (voice.peerId === peerId) voice.audio.volume = v;
+    });
+    row.append(range, val);
+    pop.append(title, row);
+    pop.addEventListener('click', (e) => e.stopPropagation());
+    document.body.append(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = `${r.bottom + 8}px`;
+    pop.style.left = `${Math.max(16, Math.min(r.left, window.innerWidth - pop.offsetWidth - 16))}px`;
+  }
+
+  function closeVolumePopover() {
+    const p = document.getElementById('volPop');
+    if (p) p.remove();
+  }
+  document.addEventListener('click', closeVolumePopover);
 
   // =========================================================
   // Controles
@@ -1262,8 +1780,35 @@
     scr.querySelector('span').textContent = screenOn ? 'Parar transmissão' : 'Transmitir tela';
     // Virar câmera: só no celular, com a câmera ligada
     $('#btnFlip').hidden = !(IS_MOBILE && local.camera);
+
+    const mic = $('#btnMic');
+    const micOn = !!(local.mic && !local.mic.muted);
+    mic.classList.toggle('on', micOn);
+    mic.classList.toggle('muted', !!(local.mic && local.mic.muted));
+    mic.querySelector('.ico').innerHTML = local.mic && local.mic.muted ? MIC_OFF_ICON : MIC_ICON;
+    mic.querySelector('span').textContent = !local.mic ? 'Entrar na voz' : micOn ? 'Mutar' : 'Desmutar';
+    mic.title = !local.mic ? 'Entrar na voz (liga o microfone)' : micOn ? 'Mutar o microfone (M)' : 'Desmutar o microfone (M)';
+    const deaf = $('#btnDeafen');
+    deaf.classList.toggle('muted', deafened);
+    deaf.querySelector('span').textContent = deafened ? 'Ouvir' : 'Silenciar';
+    deaf.title = deafened ? 'Voltar a ouvir todo mundo' : 'Parar de ouvir todo mundo';
     updateWakeLock();
   }
+
+  $('#btnMic').addEventListener('click', () => {
+    if (!local.mic) joinVoice();
+    else setMicMuted(!local.mic.muted);
+  });
+  $('#btnDeafen').addEventListener('click', () => setDeafened(!deafened));
+  // Atalho: M muta/desmuta (fora de campos de texto)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'm' && e.key !== 'M') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || $('#app').hidden) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+    if (!local.mic) joinVoice();
+    else setMicMuted(!local.mic.muted);
+  });
 
   $('#btnCam').addEventListener('click', () => (local.camera ? stopCamera() : startCamera()));
   $('#btnFlip').addEventListener('click', () => flipCamera());
@@ -1273,6 +1818,7 @@
     clearTimeout(reconnectTimer);
     stopScreen();
     stopCamera();
+    leaveVoice();
     if (ws) ws.close();
     location.reload();
   });
@@ -1297,7 +1843,10 @@
     e.stopPropagation();
     panel.hidden = !panel.hidden;
     $('#btnQuality').classList.toggle('on', !panel.hidden);
-    if (!panel.hidden) populateCameras();
+    if (!panel.hidden) {
+      populateCameras();
+      populateMics();
+    }
   });
   document.addEventListener('click', (e) => {
     if (!panel.hidden && !panel.contains(e.target) && !e.target.closest('#btnQuality')) {
@@ -1328,6 +1877,44 @@
       settings.screenAudio = audio.checked;
       saveSettings();
     });
+
+    // Voz: microfone e redução de ruído
+    const micSel = $('#micDevice');
+    micSel.value = settings.micDevice || '';
+    micSel.addEventListener('change', () => {
+      settings.micDevice = micSel.value;
+      saveSettings();
+      reopenMic();
+    });
+    const ns = $('#noiseSuppression');
+    ns.checked = settings.noiseSuppression !== false;
+    ns.addEventListener('change', () => {
+      settings.noiseSuppression = ns.checked;
+      saveSettings();
+      reopenMic();
+    });
+  }
+
+  async function populateMics() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    try {
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+      const sel = $('#micDevice');
+      sel.innerHTML = '';
+      const def = document.createElement('option');
+      def.value = '';
+      def.textContent = 'Padrão';
+      sel.append(def);
+      devices.forEach((d, i) => {
+        if (!d.deviceId || d.deviceId === 'default' || d.deviceId === 'communications') return;
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || `Microfone ${i + 1}`;
+        sel.append(o);
+      });
+      sel.value = settings.micDevice || '';
+      if (sel.value !== (settings.micDevice || '')) sel.value = '';
+    } catch {}
   }
 
   async function populateCameras() {
@@ -1352,9 +1939,186 @@
     } catch {}
   }
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-    navigator.mediaDevices.addEventListener('devicechange', populateCameras);
+    navigator.mediaDevices.addEventListener('devicechange', () => {
+      populateCameras();
+      populateMics();
+    });
   }
 
   // Atalho para testes/depuração no console
-  window.telao = { peers, tiles, local, settings, codecs: () => ({ autoCodec, gpuCodecs }) };
+  // =========================================================
+  // Diagnóstico (para investigar problemas de quem está do outro lado)
+  // =========================================================
+  const diagLog = [];
+  for (const level of ['error', 'warn']) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      try {
+        diagLog.push(`${new Date().toISOString().slice(11, 19)} ${level}: ${args.map((a) => (a && a.message) || String(a)).join(' ').slice(0, 300)}`);
+        if (diagLog.length > 40) diagLog.shift();
+      } catch {}
+      orig(...args);
+    };
+  }
+  window.addEventListener('error', (e) => { diagLog.push(`erro: ${e.message}`); if (diagLog.length > 40) diagLog.shift(); });
+  window.addEventListener('unhandledrejection', (e) => { diagLog.push(`promessa: ${(e.reason && e.reason.message) || e.reason}`); if (diagLog.length > 40) diagLog.shift(); });
+
+  async function buildDiag() {
+    const trackInfo = (s) => s && s.getTracks().map((t) => ({ kind: t.kind, state: t.readyState, muted: t.muted, enabled: t.enabled, hint: t.contentHint, settings: t.getSettings && t.getSettings() }));
+    const report = {
+      ua: navigator.userAgent,
+      version: loadedVersion,
+      settings: { codec: settings.codec, screenRes: settings.screenRes, screenFps: settings.screenFps, screenBitrate: settings.screenBitrate, screenPriority: settings.screenPriority },
+      chosenCodec: chosenCodec(),
+      gpuCodecs,
+      local: { screen: trackInfo(local.screen), camera: trackInfo(local.camera), mic: local.mic ? { muted: local.mic.muted } : null },
+      peers: [],
+      log: diagLog.slice(-25),
+    };
+    for (const p of peers.values()) {
+      const info = {
+        name: p.name,
+        conn: p.pc.connectionState,
+        ice: p.pc.iceConnectionState,
+        signaling: p.pc.signalingState,
+        noForcedCodec: !!p.noForcedCodec,
+        sig: p.sig,
+        pairs: [],
+        localTypes: {},
+        transceivers: p.pc.getTransceivers().map((t) => ({ mid: t.mid, dir: t.direction, cur: t.currentDirection, stopped: t.stopped, sendTrack: t.sender.track ? `${t.sender.track.kind}:${t.sender.track.readyState}` : null })),
+        params: [],
+        out: [],
+      };
+      for (const kind of ['screen', 'camera']) {
+        for (const s of p.senders[kind]) {
+          try { info.params.push({ kind, enc: s.getParameters().encodings, deg: s.getParameters().degradationPreference }); } catch (err) { info.params.push({ kind, err: String(err) }); }
+        }
+      }
+      try {
+        const r = await p.pc.getStats();
+        r.forEach((s) => {
+          if (s.type === 'outbound-rtp') {
+            info.out.push({ kind: s.kind, mid: s.mid, codec: s.codecId && r.get(s.codecId)?.mimeType, bytes: s.bytesSent, packets: s.packetsSent, frames: s.framesEncoded, sentFrames: s.framesSent, w: s.frameWidth, h: s.frameHeight, fps: s.framesPerSecond, limit: s.qualityLimitationReason, encoder: s.encoderImplementation, target: s.targetBitrate, keyFrames: s.keyFramesEncoded, pli: s.pliCount, nack: s.nackCount });
+          }
+          if (s.type === 'candidate-pair' && s.nominated) info.pair = { state: s.state, rtt: s.currentRoundTripTime, out: s.availableOutgoingBitrate, sent: s.bytesSent };
+          // tentativas de conexão (sem endereços): tipo local -> tipo remoto, pedidos e respostas
+          if (s.type === 'candidate-pair' && info.pairs.length < 12) {
+            const l = r.get(s.localCandidateId), rm = r.get(s.remoteCandidateId);
+            info.pairs.push(`${s.state} ${l?.candidateType}/${l?.protocol}->${rm?.candidateType}/${rm?.protocol} pedidos=${s.requestsSent ?? '?'} respostas=${s.responsesReceived ?? '?'} recebidosPedidos=${s.requestsReceived ?? '?'}`);
+          }
+          if (s.type === 'local-candidate') info.localTypes[`${s.candidateType}/${s.protocol}`] = (info.localTypes[`${s.candidateType}/${s.protocol}`] || 0) + 1;
+        });
+      } catch (err) { info.statsErr = String(err); }
+      report.peers.push(info);
+    }
+    return report;
+  }
+
+  // Pede o relatório de alguém da sala (usado para investigar, pelo console: telao.diag('Nome'))
+  async function requestDiag(name) {
+    const p = [...peers.values()].find((x) => x.name === name || x.id === name);
+    if (!p) return 'ninguém com esse nome na sala';
+    window.__telaoDiag = window.__telaoDiag || {};
+    delete window.__telaoDiag[p.id];
+    sendSignal(p.id, { diag: 'request' });
+    for (let i = 0; i < 30 && !window.__telaoDiag[p.id]; i++) await new Promise((r) => setTimeout(r, 200));
+    return window.__telaoDiag[p.id] || 'sem resposta (a página dela pode estar numa versão antiga: precisa atualizar)';
+  }
+
+  // =========================================================
+  // Versão nova do Telão
+  // Confere de tempos em tempos se os arquivos do site mudaram. Se mudaram, avisa
+  // (sem recarregar sozinho, para não derrubar ninguém no meio da transmissão).
+  // =========================================================
+  const VERSION_FILES = ['app.js', 'index.html', 'style.css'];
+  let loadedVersion = null;
+  let updateShown = false;
+
+  function hashText(s) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36) + ':' + s.length;
+  }
+
+  async function siteVersion() {
+    const base = location.pathname.replace(/[^/]*$/, '');
+    const parts = await Promise.all(
+      VERSION_FILES.map((f) =>
+        fetch(`${base}${f}?v=${Date.now()}`, { cache: 'no-store' }).then((r) => (r.ok ? r.text() : Promise.reject(new Error(r.status))))
+      )
+    );
+    return hashText(parts.join('\n'));
+  }
+
+  async function checkVersion() {
+    if (updateShown) return true;
+    try {
+      const v = await siteVersion();
+      if (!loadedVersion) {
+        loadedVersion = v;
+        return false;
+      }
+      if (v !== loadedVersion) {
+        showUpdateBar();
+        return true;
+      }
+    } catch {} // sem internet agora: tenta de novo depois
+    return false;
+  }
+
+  function showUpdateBar() {
+    if (updateShown) return;
+    updateShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'update-bar';
+    bar.id = 'updateBar';
+    const text = document.createElement('span');
+    text.textContent = 'Saiu uma versão nova do Telão. Atualize para continuar se entendendo com os amigos.';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'btn primary small';
+    go.textContent = 'Atualizar';
+    go.addEventListener('click', updateNow);
+    const later = document.createElement('button');
+    later.type = 'button';
+    later.className = 'btn ghost small';
+    later.textContent = 'Depois';
+    later.addEventListener('click', () => bar.remove());
+    bar.append(text, go, later);
+    document.body.append(bar);
+  }
+
+  // Recarrega e volta sozinho para a mesma sala (e para a voz, se estava nela)
+  function updateNow() {
+    try {
+      if (!$('#app').hidden) {
+        sessionStorage.setItem('telao.autojoin', '1');
+        if (local.mic && !local.mic.muted) sessionStorage.setItem('telao.rejoinVoice', '1');
+      }
+    } catch {}
+    leaving = true;
+    try { if (ws) ws.close(); } catch {}
+    location.reload();
+  }
+
+  // Primeira leitura logo ao abrir; depois a cada 3 minutos e quando a pessoa volta para a aba
+  checkVersion();
+  setInterval(checkVersion, 3 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkVersion();
+  });
+
+  // Voltando de uma atualização: entra de novo na mesma sala
+  try {
+    if (sessionStorage.getItem('telao.autojoin') && $('#nameInput').value.trim() && params.get('sala')) {
+      sessionStorage.removeItem('telao.autojoin');
+      const rejoinVoice = sessionStorage.getItem('telao.rejoinVoice');
+      sessionStorage.removeItem('telao.rejoinVoice');
+      $('#joinForm').requestSubmit();
+      toast('Telão atualizado!');
+      if (rejoinVoice) setTimeout(() => { if (!local.mic) joinVoice(); }, 800);
+    }
+  } catch {}
+
+  window.telao = { peers, tiles, local, settings, voices, levels, checkVersion, diag: requestDiag, codecs: () => ({ autoCodec, gpuCodecs }) };
 })();
