@@ -745,7 +745,10 @@
   function setDeafened(on) {
     deafened = on;
     for (const v of voices.values()) v.audio.muted = on;
-    for (const t of tiles.values()) if (!t.local) t.video.muted = on;
+    for (const t of tiles.values()) {
+      applyTileMute(t);
+      updateTileAudio(t);
+    }
     updateButtons();
     renderPeople();
     if (on) toast('Você não está ouvindo ninguém. Clique em "Ouvir" para voltar.');
@@ -1151,8 +1154,11 @@
       <div class="tile-top"><span class="badge live">AO VIVO</span><span class="stats"></span></div>
       <div class="tile-bottom">
         <span class="label"></span>
+        <div class="audio-ctl" hidden>
+          <button class="icon-btn snd" type="button" data-act="mute" aria-label="Som"></button>
+          <input type="range" class="vol" min="0" max="100" step="1" value="100" aria-label="Volume da transmissão">
+        </div>
         <div class="actions">
-          <input type="range" class="vol" min="0" max="1" step="0.05" value="1" title="Volume" aria-label="Volume" hidden>
           ${btn('focus', 'Focar / desfocar', ICON.focus)}
           ${btn('popout', 'Destacar em janela separada', ICON.popout)}
           ${btn('pip', 'Flutuar por cima de tudo', ICON.pip)}
@@ -1175,7 +1181,9 @@
     tiles.set(key, t);
 
     video.srcObject = opts.stream;
-    if (t.local || deafened) video.muted = true;
+    t.userMuted = false;
+    if (!t.local) video.volume = tileVolume(t);
+    applyTileMute(t);
     playWithFallback(video);
 
     el.addEventListener('click', (e) => {
@@ -1185,12 +1193,22 @@
       tileAction(t, b.dataset.act);
     });
     el.addEventListener('dblclick', (e) => {
-      if (e.target.closest('.actions')) return;
+      if (e.target.closest('.actions, .audio-ctl')) return;
       toggleFocus(key);
     });
-    el.querySelector('.vol').addEventListener('input', (e) => {
-      video.volume = Number(e.target.value);
+    const vol = el.querySelector('.vol');
+    vol.value = String(Math.round(video.volume * 100));
+    vol.addEventListener('input', () => {
+      video.volume = Number(vol.value) / 100;
+      // mexer no volume desmuta (como no Discord)
+      if (t.userMuted && video.volume > 0) t.userMuted = false;
+      applyTileMute(t);
+      saveTileVolume(t, video.volume);
+      updateTileAudio(t);
     });
+    // Se o som da transmissão chegar depois (ou sair), atualiza o controle
+    opts.stream.addEventListener('addtrack', () => updateTileAudio(t));
+    opts.stream.addEventListener('removetrack', () => updateTileAudio(t));
 
     $('#stage').append(el);
     updateTileLabel(t);
@@ -1208,7 +1226,7 @@
       document.addEventListener(
         'click',
         () => {
-          for (const t of tiles.values()) if (!t.local) t.video.muted = deafened;
+          for (const t of tiles.values()) applyTileMute(t);
           resumeAudio();
           for (const v of voices.values()) v.audio.play().catch(() => {});
         },
@@ -1238,9 +1256,59 @@
     } catch {}
   }
 
+  // ---------- Som de cada transmissão ----------
+  const SND_ON = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg>';
+  const SND_OFF = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm18.7 3-2.5-2.5-1.4 1.4 2.5 2.5-2.5 2.5 1.4 1.4 2.5-2.5 2.5 2.5 1.4-1.4-2.5-2.5 2.5-2.5-1.4-1.4z" transform="translate(-2 0)"/></svg>';
+  const SND_NONE = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm11.6 3.4 1.4-1.4M14 7l7 10" stroke="currentColor" stroke-width="2" fill="none"/><path d="M3 9v6h4l5 5V4L7 9z"/></svg>';
+
+  function tileVolumeKey(t) {
+    return `${peers.get(t.ownerId)?.name || '?'}:${t.kind || 'video'}`;
+  }
+
+  function tileVolume(t) {
+    try {
+      const v = JSON.parse(localStorage.getItem('telao.tileVolumes') || '{}')[tileVolumeKey(t)];
+      return typeof v === 'number' ? v : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  function saveTileVolume(t, v) {
+    try {
+      const all = JSON.parse(localStorage.getItem('telao.tileVolumes') || '{}');
+      all[tileVolumeKey(t)] = v;
+      localStorage.setItem('telao.tileVolumes', JSON.stringify(all));
+    } catch {}
+  }
+
+  function applyTileMute(t) {
+    t.video.muted = t.local || deafened || !!t.userMuted;
+  }
+
   function updateTileAudio(t) {
-    const hasAudio = !t.local && t.stream.getAudioTracks().length > 0;
-    t.el.querySelector('.vol').hidden = !hasAudio;
+    const ctl = t.el.querySelector('.audio-ctl');
+    if (t.local) {
+      ctl.hidden = true;
+      return;
+    }
+    ctl.hidden = false;
+    const hasAudio = t.stream.getAudioTracks().length > 0;
+    const btnSnd = ctl.querySelector('.snd');
+    const vol = ctl.querySelector('.vol');
+    ctl.classList.toggle('no-audio', !hasAudio);
+    vol.disabled = !hasAudio;
+    btnSnd.disabled = !hasAudio;
+    if (!hasAudio) {
+      btnSnd.innerHTML = SND_NONE;
+      btnSnd.title = 'Esta transmissão está sem áudio';
+      vol.title = 'Esta transmissão está sem áudio';
+      return;
+    }
+    const silent = t.userMuted || deafened || t.video.volume === 0;
+    btnSnd.innerHTML = silent ? SND_OFF : SND_ON;
+    btnSnd.title = deafened ? 'Você silenciou tudo (botão Ouvir)' : t.userMuted ? 'Ligar o som' : 'Tirar o som';
+    vol.title = `Volume: ${Math.round(t.video.volume * 100)}%`;
   }
 
   function removeTile(key) {
@@ -1276,6 +1344,22 @@
   }
 
   function tileAction(t, act) {
+    if (act === 'mute') {
+      if (deafened) {
+        toast('Você silenciou tudo. Clique em "Ouvir" na barra de baixo para voltar a ouvir.');
+        return;
+      }
+      t.userMuted = !t.userMuted;
+      // desmutar com o volume no zero: volta para um volume audível
+      if (!t.userMuted && t.video.volume === 0) {
+        t.video.volume = 0.5;
+        t.el.querySelector('.vol').value = '50';
+        saveTileVolume(t, 0.5);
+      }
+      applyTileMute(t);
+      updateTileAudio(t);
+      return;
+    }
     if (act === 'focus') toggleFocus(t.key);
     else if (act === 'popout') popout(t);
     else if (act === 'pip') floatPip(t);

@@ -196,6 +196,25 @@ button, input, select { font: inherit; color: inherit; }
 .icon-btn svg { width: 17px; height: 17px; fill: currentColor; }
 .vol { width: 80px; accent-color: var(--accent); }
 
+/* Som da transmissão: sempre visível nos vídeos dos amigos */
+.audio-ctl {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: auto;
+  background: rgba(20, 23, 28, .7);
+  border-radius: 10px;
+  padding: 2px 10px 2px 2px;
+}
+.audio-ctl[hidden] { display: none; }
+.audio-ctl .vol { width: 96px; cursor: pointer; }
+.audio-ctl.no-audio { padding-right: 2px; }
+.audio-ctl.no-audio .vol { display: none; }
+.audio-ctl.no-audio .snd { opacity: .55; cursor: default; }
+.audio-ctl.no-audio .snd:hover { background: rgba(20, 23, 28, .8); color: inherit; }
+.tile-bottom .label { min-width: 0; flex: 0 1 auto; }
+.stage.has-focus .tile:not(.focused) .audio-ctl .vol { display: none; }
+.stage.has-focus .tile:not(.focused) .audio-ctl { padding-right: 2px; }
+@media (max-width: 520px) { .audio-ctl .vol { width: 70px; } }
+
 .tile:fullscreen { border: none; border-radius: 0; }
 
 /* Dentro do app de Android: janelas destacadas/flutuantes não existem; áudio da tela ainda não */
