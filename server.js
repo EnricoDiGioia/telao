@@ -77,8 +77,9 @@ function send(ws, msg) {
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 });
 
 wss.on('connection', (ws) => {
-  const id = crypto.randomUUID().slice(0, 8);
+  let id = crypto.randomUUID().slice(0, 8);
   let roomName = null;
+  let replaced = false;
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
 
@@ -96,6 +97,16 @@ wss.on('connection', (ws) => {
       if (!rooms.has(room)) rooms.set(room, new Map());
       const members = rooms.get(room);
 
+      // Quem caiu volta com a mesma identidade; a conexão antiga é trocada sem anunciar saída
+      if (typeof msg.id === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(msg.id)) {
+        id = msg.id;
+        const old = members.get(id);
+        if (old) {
+          old.replace();
+          members.delete(id);
+        }
+      }
+
       if (members.size >= MAX_PER_ROOM) {
         send(ws, { type: 'full', max: MAX_PER_ROOM });
         return ws.close();
@@ -109,7 +120,15 @@ wss.on('connection', (ws) => {
         peers: [...members].map(([pid, m]) => ({ id: pid, name: m.name, streams: m.streams })),
       });
       for (const m of members.values()) send(m.ws, { type: 'peer-joined', id, name });
-      members.set(id, { ws, name, streams: {} });
+      members.set(id, {
+        ws,
+        name,
+        streams: {},
+        replace: () => {
+          replaced = true;
+          try { ws.terminate(); } catch {}
+        },
+      });
       console.log(`[${room}] ${name} entrou (${members.size} na sala)`);
       return;
     }
@@ -118,6 +137,12 @@ wss.on('connection', (ws) => {
     const members = rooms.get(roomName);
     if (!members) return;
     const me = members.get(id);
+
+    // Só para testes automatizados: derruba esta conexão como se a internet tivesse caído
+    if (msg.type === 'test-drop' && process.env.TELAO_TEST_HOOKS) {
+      ws.terminate();
+      return;
+    }
 
     if (msg.type === 'signal') {
       const target = members.get(String(msg.to));
@@ -133,14 +158,17 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
-    if (!roomName) return;
+  ws.on('close', (code) => {
+    if (!roomName || replaced) return;
     const members = rooms.get(roomName);
     if (!members) return;
     const me = members.get(id);
+    if (!me || me.ws !== ws) return;
     members.delete(id);
-    for (const m of members.values()) send(m.ws, { type: 'peer-left', id });
-    console.log(`[${roomName}] ${me?.name || id} saiu (${members.size} na sala)`);
+    // clean = saiu de propósito; se só caiu (1006), os amigos esperam um pouco antes de desfazer a conexão
+    const clean = code === 1000 || code === 1001 || code === 1005;
+    for (const m of members.values()) send(m.ws, { type: 'peer-left', id, clean });
+    console.log(`[${roomName}] ${me?.name || id} saiu (${members.size} na sala)${clean ? '' : ' — caiu'}`);
     if (members.size === 0) rooms.delete(roomName);
   });
 });

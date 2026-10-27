@@ -217,6 +217,16 @@ button, input, select { font: inherit; color: inherit; }
 
 .tile:fullscreen { border: none; border-radius: 0; }
 
+/* Conexão com quem transmite caiu: avisa em cima do vídeo em vez de só ficar preto */
+.tile.reconnecting::after {
+  content: 'Reconectando…';
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  background: rgba(10, 12, 15, .6);
+  color: #e9ecf1; font-weight: 600; letter-spacing: .02em;
+  pointer-events: none;
+}
+
 /* Dentro do app de Android: janelas destacadas/flutuantes não existem; áudio da tela ainda não */
 .in-app [data-act="popout"], .in-app [data-act="pip"], .in-app .screen-audio { display: none !important; }
 

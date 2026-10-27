@@ -127,6 +127,22 @@ export class Room extends DurableObject {
       const ice = await iceServers(this.env);
       const fresh = ws.deserializeAttachment();
       if (!fresh || fresh.joined) return;
+
+      // Quem caiu do servidor volta com a MESMA identidade: as conexões de vídeo dos amigos
+      // com essa pessoa continuam valendo. Se a conexão antiga ainda estiver registrada
+      // (o servidor nem percebeu a queda), ela é trocada pela nova sem anunciar saída.
+      const wanted = typeof msg.id === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(msg.id) ? msg.id : null;
+      if (wanted) {
+        for (const { ws: old, a } of this.members(ws)) {
+          if (a.id !== wanted) continue;
+          a.joined = false;
+          a.replaced = true;
+          try { old.serializeAttachment(a); } catch {}
+          try { old.close(4001, 'Conexão substituída'); } catch {}
+        }
+        me.id = wanted;
+      }
+
       const max = Number(this.env.MAX_PER_ROOM) || 8;
       const others = this.members(ws);
       if (others.length >= max) {
@@ -169,27 +185,32 @@ export class Room extends DurableObject {
     }
   }
 
-  leave(ws) {
+  // clean = saiu de propósito (botão Sair, fechou a aba). Se só caiu, os amigos esperam um pouco
+  // antes de desfazer a conexão de vídeo, porque a pessoa costuma voltar em segundos.
+  leave(ws, clean) {
     let me;
     try { me = ws.deserializeAttachment(); } catch {}
-    if (!me || !me.joined) return;
+    if (!me || !me.joined || me.replaced) return;
     me.joined = false;
     try { ws.serializeAttachment(me); } catch {}
-    for (const { ws: other } of this.members(ws)) this.send(other, { type: 'peer-left', id: me.id });
+    // se a mesma pessoa já voltou por outra conexão, não anuncia saída
+    if (this.members(ws).some(({ a }) => a.id === me.id)) return;
+    for (const { ws: other } of this.members(ws)) this.send(other, { type: 'peer-left', id: me.id, clean: !!clean });
   }
 
   async webSocketClose(ws, code, reason, wasClean) {
     let me;
     try { me = ws.deserializeAttachment(); } catch {}
-    if (!wasClean) console.log(`[${me?.name || '?'}] desconectou sem fechar direito (código ${code})`);
-    this.leave(ws);
+    const clean = wasClean && code !== 1006;
+    if (!clean && !me?.replaced) console.log(`[${me?.name || '?'}] desconectou sem fechar direito (código ${code})`);
+    this.leave(ws, clean);
     try { ws.close(code === 1005 ? 1000 : code, 'tchau'); } catch {}
   }
 
   async webSocketError(ws, error) {
     let me;
     try { me = ws.deserializeAttachment(); } catch {}
-    console.log(`[${me?.name || '?'}] erro na conexão com o servidor: ${String(error)}`);
-    this.leave(ws);
+    if (!me?.replaced) console.log(`[${me?.name || '?'}] erro na conexão com o servidor: ${String(error)}`);
+    this.leave(ws, false);
   }
 }

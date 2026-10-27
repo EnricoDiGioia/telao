@@ -309,25 +309,83 @@
     dot.title = state === 'ok' ? 'Conectado ao servidor' : state === 'bad' ? 'Sem conexão com o servidor' : 'Conectando…';
   }
 
+  // Minha identidade na sala durante toda esta visita à página. Se a conexão com o servidor
+  // cair, eu volto com a mesma: os amigos continuam com as conexões de vídeo que já existem.
+  const CLIENT_ID = (() => {
+    try { return crypto.randomUUID().replace(/-/g, '').slice(0, 20); } catch { return 'c' + Math.random().toString(36).slice(2, 14) + Date.now().toString(36); }
+  })();
+  let serverDownToastShown = false;
+
   function connect() {
     setConn('connecting');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws?sala=${encodeURIComponent(room)}`);
-    ws.onopen = () => wsSend({ type: 'join', room, name: myName });
-    ws.onmessage = (e) => {
+    const sock = new WebSocket(`${proto}://${location.host}/ws?sala=${encodeURIComponent(room)}`);
+    ws = sock;
+    sock.onopen = () => wsSend({ type: 'join', room, name: myName, id: CLIENT_ID });
+    sock.onmessage = (e) => {
+      if (sock !== ws) return;
       let m;
       try { m = JSON.parse(e.data); } catch { return; }
       onServerMessage(m);
     };
-    ws.onclose = () => {
+    sock.onclose = () => {
+      if (sock !== ws) return;
       setConn('bad');
-      for (const id of [...peers.keys()]) removePeer(id);
-      myId = null;
+      // As conexões de vídeo NÃO dependem do servidor depois de prontas: ficam como estão.
       if (leaving) return;
-      if (wasConnected) toast('A conexão com o servidor caiu. Tentando reconectar…', 'error');
+      if (wasConnected && !serverDownToastShown) {
+        serverDownToastShown = true;
+        toast('A conexão com o servidor caiu. Reconectando… (a transmissão continua)', 'error');
+      }
       wasConnected = false;
-      reconnectTimer = setTimeout(connect, 2000);
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, 1500);
     };
+  }
+
+  // Remove quem sumiu, mas só quando a conexão de vídeo com a pessoa também parou
+  // (quem só caiu do servidor costuma voltar em segundos, e o vídeo segue direto entre vocês).
+  function dropWhenGone(id, waitMs = 20000) {
+    const peer = peers.get(id);
+    if (!peer) return;
+    peer.awaiting = true;
+    clearTimeout(peer.goneTimer);
+    peer.goneTimer = setTimeout(function check() {
+      const p = peers.get(id);
+      if (!p || !p.awaiting) return;
+      const st = p.pc.connectionState;
+      if (st === 'connected' || st === 'connecting') {
+        p.goneTimer = setTimeout(check, 10000);
+        return;
+      }
+      removePeer(id);
+    }, waitMs);
+  }
+
+  // Volta do servidor: quem está na lista segue; quem não está, espera um pouco; conexões caídas são retomadas
+  function resumePeers(list) {
+    const listed = new Set(list.map((p) => p.id));
+    for (const p of list) {
+      if (isOwnNativePeer(p.id, p.name)) continue;
+      const peer = peers.get(p.id);
+      if (peer && !['failed', 'closed'].includes(peer.pc.connectionState)) {
+        peer.awaiting = false;
+        clearTimeout(peer.goneTimer);
+        // quem acabou de voltar ainda não reanunciou o que transmite: não apaga nada com lista vazia
+        if (p.streams && Object.keys(p.streams).length) applyMeta(peer, p.streams, p.name);
+        else if (p.name) peer.name = p.name;
+      } else {
+        if (peer) removePeer(p.id);
+        const fresh = createPeer(p.id, p.name);
+        applyMeta(fresh, p.streams || {}, p.name);
+      }
+    }
+    for (const [id, peer] of peers) {
+      if (!listed.has(id)) dropWhenGone(id);
+      else if (peer.pc.connectionState === 'disconnected') {
+        try { peer.pc.restartIce(); } catch {}
+      }
+    }
   }
 
   // Mantém a conexão com o servidor viva (conexões paradas são derrubadas)
@@ -338,31 +396,57 @@
   function onServerMessage(m) {
     switch (m.type) {
       case 'welcome': {
+        const resuming = peers.size > 0;
         myId = m.id;
         wasConnected = true;
         if (Array.isArray(m.iceServers)) iceServers = m.iceServers;
         setConn('ok');
-        for (const p of m.peers) {
-          if (isOwnNativePeer(p.id, p.name)) continue;
-          const peer = createPeer(p.id, p.name);
-          applyMeta(peer, p.streams || {}, p.name);
+        if (resuming) {
+          resumePeers(m.peers);
+          if (serverDownToastShown) toast('Reconectado ao servidor.');
+        } else {
+          for (const p of m.peers) {
+            if (isOwnNativePeer(p.id, p.name)) continue;
+            const peer = createPeer(p.id, p.name);
+            applyMeta(peer, p.streams || {}, p.name);
+          }
+        }
+        serverDownToastShown = false;
+        broadcastMeta();
+        renderPeople();
+        break;
+      }
+      case 'peer-joined': {
+        if (isOwnNativePeer(m.id, m.name)) break;
+        const existing = peers.get(m.id);
+        if (existing) {
+          // Mesma pessoa voltando ao servidor (caiu e voltou): a conexão de vídeo continua
+          existing.awaiting = false;
+          clearTimeout(existing.goneTimer);
+          if (m.name) existing.name = m.name;
+          if (['failed', 'closed'].includes(existing.pc.connectionState)) {
+            removePeer(m.id);
+            createPeer(m.id, m.name);
+          }
+        } else {
+          createPeer(m.id, m.name);
+          toast(`${m.name} entrou na sala`);
         }
         broadcastMeta();
         renderPeople();
         break;
       }
-      case 'peer-joined':
-        if (isOwnNativePeer(m.id, m.name)) break;
-        createPeer(m.id, m.name);
-        toast(`${m.name} entrou na sala`);
-        broadcastMeta();
-        renderPeople();
-        break;
       case 'peer-left': {
         ignoredPeers.delete(m.id);
         const p = peers.get(m.id);
-        if (p) toast(`${p.name} saiu da sala`);
-        removePeer(m.id);
+        if (!p) break;
+        if (m.clean === false) {
+          // Caiu do servidor (não saiu de propósito): espera antes de desfazer a conexão de vídeo
+          dropWhenGone(m.id);
+        } else {
+          toast(`${p.name} saiu da sala`);
+          removePeer(m.id);
+        }
         break;
       }
       case 'signal':
@@ -413,7 +497,37 @@
     for (const [key, v] of [...voices]) {
       if (v.peerId === peer.id && !(v.stream.id in streams)) removeVoice(key);
     }
+    // Transmissão que já está chegando mas ficou sem quadro (ex.: o aviso chegou atrasado): remonta
+    for (const [sid, kind] of Object.entries(streams)) {
+      const stream = peer.remoteStreams && peer.remoteStreams.get(sid);
+      if (!stream || !stream.getTracks().some((t) => t.readyState === 'live')) continue;
+      const key = `${peer.id}:${sid}`;
+      if (isMicKind(kind)) {
+        if (!voices.has(key)) attachVoice(peer, stream);
+      } else if (!tiles.has(key)) {
+        showRemoteStream(peer, stream);
+      }
+    }
     renderPeople();
+  }
+
+  // Mostra (ou atualiza) o quadro de uma transmissão que chegou de um amigo
+  function showRemoteStream(peer, stream) {
+    peer.remoteStreams.set(stream.id, stream);
+    const key = `${peer.id}:${stream.id}`;
+    const isNew = !tiles.has(key);
+    const t = ensureTile(key, { stream, ownerId: peer.id, kind: peer.meta[stream.id], local: false });
+    updateTileAudio(t);
+    applyPlayback(peer);
+    stream.onremovetrack = () => {
+      if (!stream.getTracks().length) removeTile(key);
+      else updateTileAudio(t);
+    };
+    // Quando alguém começa a transmitir a tela, ela vai para o destaque (se nada estiver focado)
+    if (isNew && peer.meta[stream.id] === 'screen' && !focusKey) {
+      focusKey = key;
+      updateLayout();
+    }
   }
 
   // =========================================================
@@ -431,6 +545,7 @@
       makingOffer: false,
       ignoreOffer: false,
       senders: { screen: [], camera: [], mic: [] },
+      remoteStreams: new Map(), // transmissões que já recebi dessa pessoa (id -> MediaStream)
       // contagem das mensagens de conexão (para conferir se alguma se perde no caminho)
       sig: { candSent: 0, candRecv: 0, candAdded: 0, candFailed: 0, descSent: 0, descRecv: 0, sentTypes: {}, recvTypes: {} },
       meta: {},
@@ -480,32 +595,25 @@
       showRemoteStream(peer, stream);
     };
 
-    const showRemoteStream = (peer, stream) => {
-      const key = `${peer.id}:${stream.id}`;
-      const isNew = !tiles.has(key);
-      const t = ensureTile(key, { stream, ownerId: peer.id, kind: peer.meta[stream.id], local: false });
-      updateTileAudio(t);
-      applyPlayback(peer);
-      stream.onremovetrack = () => {
-        if (!stream.getTracks().length) removeTile(key);
-        else updateTileAudio(t);
-      };
-      // Quando alguém começa a transmitir a tela, ela vai para o destaque (se nada estiver focado)
-      if (isNew && peer.meta[stream.id] === 'screen' && !focusKey) {
-        focusKey = key;
-        updateLayout();
-      }
-    };
-
     pc.onconnectionstatechange = () => {
+      if (peers.get(peer.id) !== peer) return;
       if (pc.connectionState === 'failed') {
-        pc.restartIce();
-        if (!peer.warnedFail) {
+        try { pc.restartIce(); } catch {}
+        if (!peer.warnedFail && !peer.awaiting) {
           peer.warnedFail = true;
-          toast(`Não foi possível conectar direto com ${peer.name}. Se continuar, vocês provavelmente precisam de um servidor TURN (veja o README).`, 'error');
+          toast(
+            peer.everConnected
+              ? `A conexão com ${peer.name} caiu. Tentando reconectar…`
+              : `Não foi possível conectar direto com ${peer.name}. Se continuar, vocês provavelmente precisam de um servidor TURN (veja o README).`,
+            'error'
+          );
         }
       }
-      if (pc.connectionState === 'connected') peer.warnedFail = false;
+      if (pc.connectionState === 'connected') {
+        peer.warnedFail = false;
+        peer.everConnected = true;
+      }
+      for (const t of tiles.values()) if (t.ownerId === peer.id) t.el.classList.toggle('reconnecting', ['disconnected', 'failed'].includes(pc.connectionState));
       renderPeople();
     };
 
@@ -529,7 +637,20 @@
       window.__telaoDiag[from] = data.report;
       return;
     }
-    const peer = peers.get(from) || createPeer(from, '…');
+    let peer = peers.get(from) || createPeer(from, '…');
+    // O amigo recriou a conexão do lado dele (outro "certificado" na oferta): recrio a minha
+    // também, em vez de ficar com uma conexão pendurada e tela preta.
+    if (description && description.type === 'offer' && peer.pc.remoteDescription) {
+      const fp = (sdp) => (/a=fingerprint:\S+ (\S+)/.exec(sdp || '') || [])[1];
+      const before = fp(peer.pc.remoteDescription.sdp);
+      const now = fp(description.sdp);
+      if (before && now && before !== now) {
+        const { name, meta } = peer;
+        removePeer(from);
+        peer = createPeer(from, name);
+        peer.meta = meta;
+      }
+    }
     const pc = peer.pc;
     try {
       if (description) {
@@ -566,6 +687,7 @@
   function removePeer(id) {
     const peer = peers.get(id);
     if (!peer) return;
+    clearTimeout(peer.goneTimer);
     try { peer.pc.close(); } catch {}
     peers.delete(id);
     for (const [key, t] of [...tiles]) if (t.ownerId === id) removeTile(key);
@@ -718,6 +840,7 @@
   }
 
   function attachVoice(peer, stream) {
+    if (peer.remoteStreams) peer.remoteStreams.set(stream.id, stream);
     const key = `${peer.id}:${stream.id}`;
     if (voices.has(key)) return voices.get(key);
     const audio = new Audio();
@@ -2120,5 +2243,10 @@
     }
   } catch {}
 
-  window.telao = { peers, tiles, local, settings, voices, levels, checkVersion, diag: requestDiag, codecs: () => ({ autoCodec, gpuCodecs }) };
+  window.telao = {
+    peers, tiles, local, settings, voices, levels, checkVersion, diag: requestDiag,
+    codecs: () => ({ autoCodec, gpuCodecs }),
+    // só para testes automatizados (o servidor de verdade ignora): simula a internet caindo
+    testDrop: () => wsSend({ type: 'test-drop' }),
+  };
 })();
