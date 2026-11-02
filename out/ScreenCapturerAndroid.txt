@@ -1,0 +1,232 @@
+Compiled from "ScreenCapturerAndroid.java"
+public class org.webrtc.ScreenCapturerAndroid implements org.webrtc.VideoCapturer,org.webrtc.VideoSink {
+  private static final int DISPLAY_FLAGS;
+
+  private static final int VIRTUAL_DISPLAY_DPI;
+
+  private final android.content.Intent mediaProjectionPermissionResultData;
+
+  private final android.media.projection.MediaProjection$Callback mediaProjectionCallback;
+
+  private int width;
+
+  private int height;
+
+  private android.hardware.display.VirtualDisplay virtualDisplay;
+
+  private org.webrtc.SurfaceTextureHelper surfaceTextureHelper;
+
+  private org.webrtc.CapturerObserver capturerObserver;
+
+  private long numCapturedFrames;
+
+  private android.media.projection.MediaProjection mediaProjection;
+
+  private boolean isDisposed;
+
+  private android.media.projection.MediaProjectionManager mediaProjectionManager;
+
+  public org.webrtc.ScreenCapturerAndroid(android.content.Intent, android.media.projection.MediaProjection$Callback);
+    Code:
+       0: aload_0
+       1: invokespecial #3                  // Method java/lang/Object."<init>":()V
+       4: aload_0
+       5: aload_1
+       6: putfield      #9                  // Field mediaProjectionPermissionResultData:Landroid/content/Intent;
+       9: aload_0
+      10: aload_2
+      11: putfield      #15                 // Field mediaProjectionCallback:Landroid/media/projection/MediaProjection$Callback;
+      14: return
+
+  private void checkNotDisposed();
+    Code:
+       0: aload_0
+       1: getfield      #19                 // Field isDisposed:Z
+       4: ifeq          17
+       7: new           #23                 // class java/lang/RuntimeException
+      10: dup
+      11: ldc           #25                 // String capturer is disposed.
+      13: invokespecial #27                 // Method java/lang/RuntimeException."<init>":(Ljava/lang/String;)V
+      16: athrow
+      17: return
+
+  public android.media.projection.MediaProjection getMediaProjection();
+    Code:
+       0: aload_0
+       1: getfield      #30                 // Field mediaProjection:Landroid/media/projection/MediaProjection;
+       4: areturn
+
+  public synchronized void initialize(org.webrtc.SurfaceTextureHelper, android.content.Context, org.webrtc.CapturerObserver);
+    Code:
+       0: aload_0
+       1: invokevirtual #34                 // Method checkNotDisposed:()V
+       4: aload_3
+       5: ifnonnull     18
+       8: new           #23                 // class java/lang/RuntimeException
+      11: dup
+      12: ldc           #37                 // String capturerObserver not set.
+      14: invokespecial #27                 // Method java/lang/RuntimeException."<init>":(Ljava/lang/String;)V
+      17: athrow
+      18: aload_0
+      19: aload_3
+      20: putfield      #39                 // Field capturerObserver:Lorg/webrtc/CapturerObserver;
+      23: aload_1
+      24: ifnonnull     37
+      27: new           #23                 // class java/lang/RuntimeException
+      30: dup
+      31: ldc           #43                 // String surfaceTextureHelper not set.
+      33: invokespecial #27                 // Method java/lang/RuntimeException."<init>":(Ljava/lang/String;)V
+      36: athrow
+      37: aload_0
+      38: aload_1
+      39: putfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+      42: aload_0
+      43: aload_2
+      44: ldc           #51                 // String media_projection
+      46: invokevirtual #53                 // Method android/content/Context.getSystemService:(Ljava/lang/String;)Ljava/lang/Object;
+      49: checkcast     #57                 // class android/media/projection/MediaProjectionManager
+      52: putfield      #59                 // Field mediaProjectionManager:Landroid/media/projection/MediaProjectionManager;
+      55: return
+
+  public synchronized void startCapture(int, int, int);
+    Code:
+       0: aload_0
+       1: invokevirtual #34                 // Method checkNotDisposed:()V
+       4: aload_0
+       5: iload_1
+       6: putfield      #63                 // Field width:I
+       9: aload_0
+      10: iload_2
+      11: putfield      #67                 // Field height:I
+      14: aload_0
+      15: aload_0
+      16: getfield      #59                 // Field mediaProjectionManager:Landroid/media/projection/MediaProjectionManager;
+      19: iconst_m1
+      20: aload_0
+      21: getfield      #9                  // Field mediaProjectionPermissionResultData:Landroid/content/Intent;
+      24: invokevirtual #72                 // Method android/media/projection/MediaProjectionManager.getMediaProjection:(ILandroid/content/Intent;)Landroid/media/projection/MediaProjection;
+      27: putfield      #30                 // Field mediaProjection:Landroid/media/projection/MediaProjection;
+      30: aload_0
+      31: getfield      #30                 // Field mediaProjection:Landroid/media/projection/MediaProjection;
+      34: aload_0
+      35: getfield      #15                 // Field mediaProjectionCallback:Landroid/media/projection/MediaProjection$Callback;
+      38: aload_0
+      39: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+      42: invokevirtual #76                 // Method org/webrtc/SurfaceTextureHelper.getHandler:()Landroid/os/Handler;
+      45: invokevirtual #82                 // Method android/media/projection/MediaProjection.registerCallback:(Landroid/media/projection/MediaProjection$Callback;Landroid/os/Handler;)V
+      48: aload_0
+      49: invokevirtual #88                 // Method createVirtualDisplay:()V
+      52: aload_0
+      53: getfield      #39                 // Field capturerObserver:Lorg/webrtc/CapturerObserver;
+      56: iconst_1
+      57: invokeinterface #91,  2           // InterfaceMethod org/webrtc/CapturerObserver.onCapturerStarted:(Z)V
+      62: aload_0
+      63: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+      66: aload_0
+      67: invokevirtual #97                 // Method org/webrtc/SurfaceTextureHelper.startListening:(Lorg/webrtc/VideoSink;)V
+      70: return
+
+  public synchronized void stopCapture();
+    Code:
+       0: aload_0
+       1: invokevirtual #34                 // Method checkNotDisposed:()V
+       4: aload_0
+       5: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+       8: invokevirtual #76                 // Method org/webrtc/SurfaceTextureHelper.getHandler:()Landroid/os/Handler;
+      11: new           #101                // class org/webrtc/ScreenCapturerAndroid$1
+      14: dup
+      15: aload_0
+      16: invokespecial #103                // Method org/webrtc/ScreenCapturerAndroid$1."<init>":(Lorg/webrtc/ScreenCapturerAndroid;)V
+      19: invokestatic  #106                // Method org/webrtc/ThreadUtils.invokeAtFrontUninterruptibly:(Landroid/os/Handler;Ljava/lang/Runnable;)V
+      22: return
+
+  public synchronized void dispose();
+    Code:
+       0: aload_0
+       1: iconst_1
+       2: putfield      #19                 // Field isDisposed:Z
+       5: return
+
+  public synchronized void changeCaptureFormat(int, int, int);
+    Code:
+       0: aload_0
+       1: invokevirtual #34                 // Method checkNotDisposed:()V
+       4: aload_0
+       5: iload_1
+       6: putfield      #63                 // Field width:I
+       9: aload_0
+      10: iload_2
+      11: putfield      #67                 // Field height:I
+      14: aload_0
+      15: getfield      #112                // Field virtualDisplay:Landroid/hardware/display/VirtualDisplay;
+      18: ifnonnull     22
+      21: return
+      22: aload_0
+      23: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+      26: invokevirtual #76                 // Method org/webrtc/SurfaceTextureHelper.getHandler:()Landroid/os/Handler;
+      29: new           #116                // class org/webrtc/ScreenCapturerAndroid$2
+      32: dup
+      33: aload_0
+      34: invokespecial #118                // Method org/webrtc/ScreenCapturerAndroid$2."<init>":(Lorg/webrtc/ScreenCapturerAndroid;)V
+      37: invokestatic  #106                // Method org/webrtc/ThreadUtils.invokeAtFrontUninterruptibly:(Landroid/os/Handler;Ljava/lang/Runnable;)V
+      40: return
+
+  private void createVirtualDisplay();
+    Code:
+       0: aload_0
+       1: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+       4: aload_0
+       5: getfield      #63                 // Field width:I
+       8: aload_0
+       9: getfield      #67                 // Field height:I
+      12: invokevirtual #119                // Method org/webrtc/SurfaceTextureHelper.setTextureSize:(II)V
+      15: aload_0
+      16: aload_0
+      17: getfield      #30                 // Field mediaProjection:Landroid/media/projection/MediaProjection;
+      20: ldc           #123                // String WebRTC_ScreenCapture
+      22: aload_0
+      23: getfield      #63                 // Field width:I
+      26: aload_0
+      27: getfield      #67                 // Field height:I
+      30: sipush        400
+      33: iconst_3
+      34: new           #125                // class android/view/Surface
+      37: dup
+      38: aload_0
+      39: getfield      #45                 // Field surfaceTextureHelper:Lorg/webrtc/SurfaceTextureHelper;
+      42: invokevirtual #127                // Method org/webrtc/SurfaceTextureHelper.getSurfaceTexture:()Landroid/graphics/SurfaceTexture;
+      45: invokespecial #131                // Method android/view/Surface."<init>":(Landroid/graphics/SurfaceTexture;)V
+      48: aconst_null
+      49: aconst_null
+      50: invokevirtual #134                // Method android/media/projection/MediaProjection.createVirtualDisplay:(Ljava/lang/String;IIIILandroid/view/Surface;Landroid/hardware/display/VirtualDisplay$Callback;Landroid/os/Handler;)Landroid/hardware/display/VirtualDisplay;
+      53: putfield      #112                // Field virtualDisplay:Landroid/hardware/display/VirtualDisplay;
+      56: return
+
+  public void onFrame(org.webrtc.VideoFrame);
+    Code:
+       0: aload_0
+       1: dup
+       2: getfield      #137                // Field numCapturedFrames:J
+       5: lconst_1
+       6: ladd
+       7: putfield      #137                // Field numCapturedFrames:J
+      10: aload_0
+      11: getfield      #39                 // Field capturerObserver:Lorg/webrtc/CapturerObserver;
+      14: aload_1
+      15: invokeinterface #141,  2          // InterfaceMethod org/webrtc/CapturerObserver.onFrameCaptured:(Lorg/webrtc/VideoFrame;)V
+      20: return
+
+  public boolean isScreencast();
+    Code:
+       0: iconst_1
+       1: ireturn
+
+  public long getNumCapturedFrames();
+    Code:
+       0: aload_0
+       1: getfield      #137                // Field numCapturedFrames:J
+       4: lreturn
+}
+org/webrtc/ScreenCapturerAndroid$1.class
+org/webrtc/ScreenCapturerAndroid$2.class
+org/webrtc/ScreenCapturerAndroid.class
