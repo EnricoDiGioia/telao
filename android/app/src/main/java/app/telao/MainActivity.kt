@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -344,7 +345,14 @@ class MainActivity : Activity() {
         if (pendingScreen == null) return
         val mpm = getSystemService(MediaProjectionManager::class.java)
         @Suppress("DEPRECATION")
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION)
+        // Android 14+: pede a TELA INTEIRA. Na opção "um app só" do Android, ao trocar para
+        // outro app a transmissão deixa de mostrar o que está na tela.
+        val intent = if (Build.VERSION.SDK_INT >= 34) {
+            mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            mpm.createScreenCaptureIntent()
+        }
+        startActivityForResult(intent, REQ_PROJECTION)
     }
 
     @Deprecated("startActivityForResult continua funcionando e evita bibliotecas extras")

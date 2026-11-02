@@ -27,7 +27,6 @@ import org.webrtc.RtpParameters
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
-import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
@@ -94,7 +93,8 @@ class ScreenStreamer(
     private var factory: PeerConnectionFactory? = null
     private var helper: SurfaceTextureHelper? = null
     private var source: VideoSource? = null
-    private var capturer: ScreenCapturerAndroid? = null
+    private var capturer: TelaoScreenCapturer? = null
+    private var lastSize: Pair<Int, Int>? = null // tamanho atual da captura
     private var track: VideoTrack? = null
     private val streamId = UUID.randomUUID().toString()
 
@@ -143,25 +143,24 @@ class ScreenStreamer(
         exec.shutdown()
     }
 
-    /** O celular girou: ajusta o tamanho da captura para não ficar com tarjas pretas. */
-    fun onRotation() = runSafe {
-        val (w, h) = captureSize()
-        try {
-            capturer?.changeCaptureFormat(w, h, quality.fps)
-        } catch (e: Throwable) {
-            Log.w(tag, "Não deu para ajustar a captura após girar", e)
-        }
-    }
+    /** O celular girou (ou abriu um app em paisagem): ajusta o tamanho sem recriar a captura. */
+    fun onRotation() = runSafe { resizeCapture(captureSize()) }
 
     fun updateQuality(q: Quality) = runSafe {
         quality = q
-        val (w, h) = captureSize()
-        try {
-            capturer?.changeCaptureFormat(w, h, q.fps)
-        } catch (e: Throwable) {
-            Log.w(tag, "Não deu para mudar o tamanho da captura", e)
-        }
+        resizeCapture(captureSize(), force = true)
         peers.values.forEach { applySenderParams(it) }
+    }
+
+    /** Só redimensiona a captura existente (ver TelaoScreenCapturer). Ignora se o tamanho não mudou. */
+    private fun resizeCapture(size: Pair<Int, Int>, force: Boolean = false) {
+        if (!force && size == lastSize) return
+        try {
+            capturer?.changeCaptureFormat(size.first, size.second, quality.fps)
+            lastSize = size
+        } catch (e: Throwable) {
+            Log.w(tag, "Não deu para ajustar o tamanho da captura", e)
+        }
     }
 
     private fun runSafe(block: () -> Unit) {
@@ -202,15 +201,21 @@ class ScreenStreamer(
         helper = h
         val src = f.createVideoSource(true)
         source = src
-        val cap = ScreenCapturerAndroid(permissionData, object : MediaProjection.Callback() {
+        val cap = TelaoScreenCapturer(permissionData, object : MediaProjection.Callback() {
             override fun onStop() {
                 // O usuário parou pelo aviso do sistema (ou outro app pegou a tela)
                 onEvent(Event.ProjectionStopped)
             }
+
+            // Android 14+: o conteúdo capturado mudou de tamanho (girou, app em paisagem...)
+            override fun onCapturedContentResize(width: Int, height: Int) {
+                if (width > 0 && height > 0) runSafe { resizeCapture(scaled(width, height)) }
+            }
         })
         cap.initialize(h, context.applicationContext, src.capturerObserver)
-        val (w, hgt) = captureSize()
-        cap.startCapture(w, hgt, quality.fps)
+        val size = captureSize()
+        cap.startCapture(size.first, size.second, quality.fps)
+        lastSize = size
         capturer = cap
         track = f.createVideoTrack("telao-tela", src)
     }
@@ -222,8 +227,11 @@ class ScreenStreamer(
         val m = DisplayMetrics()
         @Suppress("DEPRECATION")
         display.getRealMetrics(m)
-        val w = m.widthPixels
-        val h = m.heightPixels
+        return scaled(m.widthPixels, m.heightPixels)
+    }
+
+    /** Reduz um tamanho até o lado menor caber na qualidade escolhida (sempre números pares). */
+    private fun scaled(w: Int, h: Int): Pair<Int, Int> {
         val short = minOf(w, h)
         val scale = if (quality.shortSide <= 0 || short <= quality.shortSide) 1.0 else quality.shortSide.toDouble() / short
         fun even(v: Double) = (v.toInt() / 2) * 2
